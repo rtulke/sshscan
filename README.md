@@ -40,12 +40,11 @@ Wraps the system `ssh` binary to probe each algorithm individually — no parami
 | Python | 3.8+ |
 | OpenSSH client | `ssh` in PATH |
 | PyYAML | for YAML host files and YAML export |
-| toml | for TOML configuration |
 
 ```bash
 pip install -r requirements.txt
 # or individually:
-pip install pyyaml toml
+pip install pyyaml
 ```
 
 ---
@@ -57,7 +56,7 @@ pip install pyyaml toml
 ```bash
 git clone https://github.com/rtulke/sshscan.git
 cd sshscan
-pip install pyyaml toml
+pip install pyyaml
 chmod +x sshscan.py
 ./sshscan.py --version
 ```
@@ -76,7 +75,7 @@ python -m venv .venv
 pip install -r requirements.txt
 python sshscan.py --version
 ```
-Note: `/etc/sshscan/` config auto-discovery does not apply on Windows; use `--config` or `%USERPROFILE%\.sshscan\config.toml`.
+Note: `/etc/sshscan/` config auto-discovery does not apply on Windows; use `--config` or place `sshscan.conf` in the working directory.
 
 ### Virtual environment (recommended)
 
@@ -92,8 +91,8 @@ python3 sshscan.py --version
 ### System-wide configuration
 
 ```bash
-mkdir -p ~/.sshscan
-cp config.toml ~/.sshscan/config.toml
+mkdir -p ~/.conf
+cp sshscan.conf ~/.conf/sshscan.conf
 # Edit to taste — loaded automatically without --config
 ```
 
@@ -103,16 +102,15 @@ cp config.toml ~/.sshscan/config.toml
 
 ### Config file auto-discovery (no --config needed)
 
-The scanner loads the first file found in this order:
+The scanner checks these locations in order and loads the first file found:
 
-| Path | Used when |
-|---|---|
-| `--config FILE` | always highest priority |
-| `~/.sshscan/config.toml` | normal user |
-| `~/.sshscan.toml` | normal user (flat) |
-| `/etc/sshscan/config.toml` | root / system-wide |
-| `/etc/sshscan.toml` | root / system-wide (flat) |
+| Priority | Path | Used when |
+|---|---|---|
+| 1 | `./sshscan.conf` | file exists in the current working directory |
+| 2 | `~/.conf/sshscan.conf` | user-level config |
+| 3 | `/etc/sshscan/sshscan.conf` | system-wide config |
 
+`--config FILE` overrides auto-discovery entirely and always takes precedence.
 CLI arguments always override config file values.
 
 ### `[scanner]` keys
@@ -135,18 +133,18 @@ CLI arguments always override config file values.
 
 ### Minimal config example
 
-```toml
+```ini
 [scanner]
 threads = 50
 timeout = 10
 
 [compliance]
-framework = "NIST"
+framework = NIST
 ```
 
 ### Full config example
 
-```toml
+```ini
 [scanner]
 threads = 30
 timeout = 15
@@ -154,19 +152,19 @@ retry_attempts = 3
 dns_cache_ttl = 600
 banner_timeout = 3
 rate_limit = 10.0
-strict_host_key_checking = "accept-new"
+strict_host_key_checking = accept-new
 
 [compliance]
-framework = "BSI_TR_02102"
+framework = BSI_TR_02102
 ```
 
 ### Privacy-focused preset
 
-Use `privacy_focus_config.toml` (included) for a ready-made configuration that enforces
+Use `privacy_focus.conf` (included) for a ready-made configuration that enforces
 the `PRIVACY_FOCUSED` compliance framework:
 
 ```bash
-python3 sshscan.py --config privacy_focus_config.toml --file hosts.txt
+python3 sshscan.py --config privacy_focus.conf --file hosts.txt
 ```
 
 ---
@@ -178,7 +176,7 @@ python3 sshscan.py --config privacy_focus_config.toml --file hosts.txt
 | Parameter | Short | Description |
 |---|---|---|
 | `--version` | `-V` | Print version and author, then exit |
-| `--config FILE` | `-c` | Load TOML configuration from FILE |
+| `--config FILE` | `-c` | Load configuration from FILE (INI format) |
 | `--help` | `-h` | Show help and exit |
 
 ### Host specification (mutually exclusive)
@@ -377,15 +375,15 @@ python3 sshscan.py --file hosts.txt --no-nsa-warnings --format json --output res
 
 ```bash
 # Explicit config
-python3 sshscan.py --config config.toml --file servers.txt
+python3 sshscan.py --config sshscan.conf --file servers.txt
 
 # Override config values on the CLI
-python3 sshscan.py --config config.toml --threads 50 --timeout 20
+python3 sshscan.py --config sshscan.conf --threads 50 --timeout 20
 
 # Use privacy preset
-python3 sshscan.py --config privacy_focus_config.toml --file hosts.txt
+python3 sshscan.py --config privacy_focus.conf --file hosts.txt
 
-# Auto-loaded from ~/.sshscan/config.toml (no --config needed)
+# Auto-loaded from ~/.conf/sshscan.conf (no --config needed)
 python3 sshscan.py --file servers.txt
 ```
 

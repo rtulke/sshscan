@@ -35,6 +35,19 @@ All notable changes to SSH Algorithm Security Scanner are documented here.
 - **`--list-frameworks`** — Fixed empty descriptions; now shows the framework's `name` field
 - **`Set` missing from typing import** — Added `Set` to `from typing import ...`
 
+### Configuration Format Change
+
+Config files now use standard INI format (parsed by Python's built-in `configparser`) instead of TOML.
+This removes the `toml` external dependency entirely — only `PyYAML` remains.
+
+| Before | After |
+|---|---|
+| `config.toml` | `sshscan.conf` |
+| `privacy_focus_config.toml` | `privacy_focus.conf` |
+| `framework = "NIST"` | `framework = NIST` (no quotes) |
+
+Auto-discovery order: `./sshscan.conf` (local) → `~/.conf/sshscan.conf` (user) → `/etc/sshscan/sshscan.conf` (system).
+
 ### Removed / Replaced
 
 - **`SSHMultiplexer`** — Removed entirely; ControlMaster multiplexing caused false positives (multiplexed slaves ignore `-o Ciphers/MACs/Kex` flags) and had an unresolvable TOCTOU race condition in `establish_master()`

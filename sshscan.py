@@ -15,7 +15,7 @@ import json
 import sys
 import csv
 import yaml
-import toml
+import configparser
 import threading
 import time
 import functools
@@ -1084,20 +1084,18 @@ class SSHEnhancedScanner:
     def _load_default_config(self) -> Dict:
         """Load configuration from default locations"""
         config_locations = [
-            Path('/etc/sshscan/config.toml'),
-            Path('/etc/sshscan.toml'),
-            Path.home() / '.sshscan' / 'config.toml',
-            Path.home() / '.sshscan.toml'
+            Path('sshscan.conf'),                            # local directory
+            Path.home() / '.conf' / 'sshscan.conf',         # user config
+            Path('/etc/sshscan/sshscan.conf'),               # system-wide
         ]
-        
+
         for config_path in config_locations:
             if config_path.exists():
                 try:
-                    logger.info(f"Loading configuration from {config_path}")
-                    return toml.load(config_path)
+                    return load_config_file(str(config_path))
                 except Exception as e:
                     logger.warning(f"Failed to load config from {config_path}: {e}")
-        
+
         logger.info("No configuration file found, using defaults")
         return {}
     
@@ -1845,20 +1843,20 @@ class SSHEnhancedScanner:
 
 
 def load_config_file(config_path: str) -> Dict:
-    """Load configuration from TOML file with validation"""
+    """Load configuration from INI/conf file with validation"""
+    config_file = Path(config_path)
+    if not config_file.exists():
+        logger.warning(f"Config file not found: {config_path}")
+        return {}
     try:
-        config_file = Path(config_path)
-        if config_file.exists():
-            logger.info(f"Loading configuration from {config_path}")
-            config = toml.load(config_file)
-            # Validate configuration
-            return ConfigValidator.validate_config(config)
-        else:
-            logger.warning(f"Config file not found: {config_path}")
-            return {}
-    except toml.TomlDecodeError as e:
-        logger.error(f"Invalid TOML syntax in {config_path}: {e}")
-        raise ConfigurationError(f"Invalid TOML configuration: {e}")
+        logger.info(f"Loading configuration from {config_path}")
+        parser = configparser.ConfigParser(inline_comment_prefixes=('#',))
+        parser.read(config_file, encoding='utf-8')
+        config = {section: dict(parser.items(section)) for section in parser.sections()}
+        return ConfigValidator.validate_config(config)
+    except configparser.Error as e:
+        logger.error(f"Invalid config syntax in {config_path}: {e}")
+        raise ConfigurationError(f"Failed to parse configuration: {e}")
     except Exception as e:
         logger.error(f"Error loading config file {config_path}: {e}")
         raise ConfigurationError(f"Failed to load configuration: {e}")
