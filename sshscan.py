@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-SSH Algorithm Security Scanner - Professional Enterprise Edition
-Features: SSH-Multiplexing, Compliance Frameworks, NSA Backdoor Detection, TOML Config, Retry Logic, DNS Caching
-Version: 2.0.0
+SSH Algorithm Security Scanner
+Features: Compliance Frameworks, NSA Backdoor Detection, TOML Config,
+         Retry Logic, DNS Caching, Enhanced Debug Mode
+Version: 3.1.0
 """
+
+__version__ = '3.1.0'
+__author__  = 'Robert Tulke, rt@debian.sh'
 
 import subprocess
 import socket
@@ -15,20 +19,66 @@ import toml
 import threading
 import time
 import functools
+import re
+import ipaddress
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Optional, Tuple, Union, Generator
+from typing import List, Dict, Optional, Tuple, Any, Set
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 import argparse
-import tempfile
 import shutil
+import io
 import logging
-from urllib.parse import urlparse
+from datetime import datetime
+
+def setup_logging(debug_enabled=False, verbose_enabled=False):
+    """Setup logging with proper debug support"""
+    if debug_enabled:
+        level = logging.DEBUG
+        format_str = '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
+    elif verbose_enabled:
+        level = logging.INFO
+        format_str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    else:
+        level = logging.WARNING
+        format_str = '%(levelname)s - %(message)s'
+    
+    logging.basicConfig(
+        level=level,
+        format=format_str,
+        datefmt='%Y-%m-%d %H:%M:%S',
+        force=True  # Override existing configuration
+    )
+    
+    # Set specific logger levels for different components
+    if debug_enabled:
+        logging.getLogger('SSHEnhancedScanner').setLevel(logging.DEBUG)
+        logging.getLogger('EnhancedDNSCache').setLevel(logging.DEBUG)
+        logging.getLogger('AlgorithmTester').setLevel(logging.DEBUG)
+    
+    return logging.getLogger(__name__)
 
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Initialize logger (will be reconfigured in main())
 logger = logging.getLogger(__name__)
+
+
+# Custom Exceptions for better error handling
+class SSHScannerError(Exception):
+    """Base exception for SSH Scanner"""
+    pass
+
+class ConfigurationError(SSHScannerError):
+    """Configuration related errors"""
+    pass
+
+class SSHConnectionError(SSHScannerError):
+    """Connection related errors"""
+    pass
+
+class ValidationError(SSHScannerError):
+    """Input validation errors"""
+    pass
 
 
 @dataclass
@@ -37,6 +87,9 @@ class SSHAlgorithmInfo:
     name: str
     type: str  # 'encryption', 'mac', 'kex', 'hostkey'
     supported: bool = True
+    
+    def __hash__(self):
+        return hash((self.name, self.type))
 
 
 @dataclass
@@ -44,29 +97,101 @@ class SSHHostResult:
     """Data class for SSH host scan results"""
     host: str
     port: int
-    status: str = "unknown"  # success, failed, timeout
+    status: str = "unknown"  # success, failed, timeout, error
     security_score: int = 0
     compliance_status: Dict[str, bool] = field(default_factory=dict)
-    nsa_backdoor_analysis: Dict[str, any] = field(default_factory=dict)
+    nsa_backdoor_analysis: Dict[str, Any] = field(default_factory=dict)
     algorithms: Dict[str, List[SSHAlgorithmInfo]] = field(default_factory=dict)
     scan_time: float = 0.0
     ssh_banner: str = ""
     error_message: str = ""
+    error_type: str = ""  # connection, timeout, dns, validation
     retry_count: int = 0
-
-
-class DNSCache:
-    """Thread-safe DNS resolution cache with TTL"""
+    timestamp: datetime = field(default_factory=datetime.now)
     
-    def __init__(self, ttl: int = 300, max_size: int = 1000):
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization"""
+        result = asdict(self)
+        result['timestamp'] = self.timestamp.isoformat()
+        return result
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'SSHHostResult':
+        """Reconstruct an SSHHostResult from a to_dict() payload."""
+        d = data.copy()
+        # Rebuild SSHAlgorithmInfo objects from plain dicts
+        raw_algos = d.pop('algorithms', {})
+        algorithms: Dict[str, List[SSHAlgorithmInfo]] = {
+            algo_type: [SSHAlgorithmInfo(**a) for a in algo_list]
+            for algo_type, algo_list in raw_algos.items()
+        }
+        # Parse ISO timestamp string back to datetime
+        ts = d.pop('timestamp', None)
+        timestamp = datetime.fromisoformat(ts) if isinstance(ts, str) else (ts or datetime.now())
+        return cls(algorithms=algorithms, timestamp=timestamp, **d)
+
+
+
+class EnhancedDNSCache:
+    """Thread-safe DNS resolution cache with TTL, IPv6 support and background cleanup"""
+    
+    def __init__(self, ttl: int = 300, max_size: int = 1000, cleanup_interval: int = 60):
         self.cache = {}
         self.ttl = ttl
         self.max_size = max_size
+        self.cleanup_interval = cleanup_interval
         self.lock = threading.Lock()
-        self.stats = {'hits': 0, 'misses': 0, 'errors': 0}
+        self.stats = {'hits': 0, 'misses': 0, 'errors': 0, 'cleanups': 0}
+        self._stop_cleanup = threading.Event()
+        self._cleanup_thread = None
+        self._start_cleanup_thread()
+        logger.debug(f"DNS cache initialized with TTL={ttl}s, max_size={max_size}")
     
-    def resolve(self, hostname: str) -> Optional[str]:
-        """Resolve hostname with caching"""
+    def _start_cleanup_thread(self):
+        """Start background cleanup thread"""
+        self._cleanup_thread = threading.Thread(target=self._cleanup_loop, daemon=True)
+        self._cleanup_thread.start()
+        logger.debug("DNS cache cleanup thread started")
+    
+    def _cleanup_loop(self):
+        """Background thread to clean expired entries"""
+        while not self._stop_cleanup.is_set():
+            try:
+                self._cleanup_expired()
+                self._stop_cleanup.wait(self.cleanup_interval)
+            except Exception as e:
+                logger.error(f"DNS cache cleanup error: {e}")
+    
+    def _cleanup_expired(self):
+        """Remove expired entries from cache"""
+        now = time.time()
+        with self.lock:
+            expired_keys = [
+                hostname for hostname, (_, timestamp) in self.cache.items()
+                if now - timestamp >= self.ttl
+            ]
+            for hostname in expired_keys:
+                del self.cache[hostname]
+            
+            if expired_keys:
+                self.stats['cleanups'] += len(expired_keys)
+                logger.debug(f"Cleaned {len(expired_keys)} expired DNS entries")
+    
+    def resolve(self, hostname: str, prefer_ipv4: bool = True) -> Optional[str]:
+        """Resolve hostname with caching and IPv6 support"""
+        # Validate hostname first
+        if not self._is_valid_hostname(hostname):
+            logger.error(f"Invalid hostname: {hostname}")
+            return None
+        
+        # Check if already an IP address
+        try:
+            ipaddress.ip_address(hostname)
+            logger.debug(f"Hostname {hostname} is already an IP address")
+            return hostname
+        except ValueError:
+            pass
+        
         now = time.time()
         
         with self.lock:
@@ -75,14 +200,36 @@ class DNSCache:
                 ip, timestamp = self.cache[hostname]
                 if now - timestamp < self.ttl:
                     self.stats['hits'] += 1
+                    logger.debug(f"DNS cache hit for {hostname} -> {ip}")
                     return ip
-                else:
-                    # Expired entry
-                    del self.cache[hostname]
         
         # Cache miss - resolve
         try:
-            ip = socket.gethostbyname(hostname)
+            logger.debug(f"Resolving {hostname} (cache miss)")
+            # Try both IPv4 and IPv6
+            addr_info = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            
+            # Filter and sort addresses
+            ipv4_addrs = []
+            ipv6_addrs = []
+            
+            for family, _, _, _, sockaddr in addr_info:
+                ip = sockaddr[0]
+                if family == socket.AF_INET:
+                    ipv4_addrs.append(ip)
+                elif family == socket.AF_INET6:
+                    ipv6_addrs.append(ip)
+            
+            # Choose based on preference
+            if prefer_ipv4 and ipv4_addrs:
+                resolved_ip = ipv4_addrs[0]
+            elif ipv6_addrs:
+                resolved_ip = ipv6_addrs[0]
+            elif ipv4_addrs:
+                resolved_ip = ipv4_addrs[0]
+            else:
+                raise socket.gaierror("No addresses found")
+            
             with self.lock:
                 # Manage cache size
                 if len(self.cache) >= self.max_size:
@@ -90,15 +237,38 @@ class DNSCache:
                     oldest_key = min(self.cache.keys(), key=lambda k: self.cache[k][1])
                     del self.cache[oldest_key]
                 
-                self.cache[hostname] = (ip, now)
+                self.cache[hostname] = (resolved_ip, now)
                 self.stats['misses'] += 1
-            return ip
             
-        except socket.gaierror as e:
+            logger.debug(f"Resolved {hostname} to {resolved_ip}")
+            return resolved_ip
+            
+        except (socket.gaierror, socket.error) as e:
             with self.lock:
                 self.stats['errors'] += 1
             logger.warning(f"DNS resolution failed for {hostname}: {e}")
             return None
+    
+    def _is_valid_hostname(self, hostname: str) -> bool:
+        """Validate hostname to prevent injection attacks"""
+        # Basic validation - alphanumeric, dots, hyphens
+        if not hostname or len(hostname) > 253:
+            return False
+        
+        # Check for valid characters
+        allowed = re.match(r'^[a-zA-Z0-9.-]+$', hostname)
+        if not allowed:
+            return False
+        
+        # Check each label
+        labels = hostname.split('.')
+        for label in labels:
+            if not label or len(label) > 63:
+                return False
+            if label.startswith('-') or label.endswith('-'):
+                return False
+        
+        return True
     
     def get_stats(self) -> Dict:
         """Get cache statistics"""
@@ -109,27 +279,170 @@ class DNSCache:
                 'hit_rate': f"{hit_rate:.1f}%",
                 'total_lookups': total,
                 'cache_size': len(self.cache),
+                'expired_cleaned': self.stats['cleanups'],
                 **self.stats
             }
+    
+    def stop(self):
+        """Stop cleanup thread"""
+        self._stop_cleanup.set()
+        if self._cleanup_thread:
+            self._cleanup_thread.join(timeout=1)
+
+
+def validate_port(port: Any) -> int:
+    """Validate and convert port number"""
+    try:
+        port_int = int(port)
+        if not 1 <= port_int <= 65535:
+            raise ValidationError(f"Port {port} out of valid range (1-65535)")
+        return port_int
+    except (ValueError, TypeError):
+        raise ValidationError(f"Invalid port: {port}")
+
+
+def validate_ip_address(ip: str) -> bool:
+    """Validate IP address (v4 or v6)"""
+    try:
+        ipaddress.ip_address(ip)
+        return True
+    except ValueError:
+        return False
+
+
+def sanitize_host_input(host: str) -> str:
+    """Sanitize host input — allowlist of valid hostname/IP/bracket characters."""
+    host = host.strip()
+    # Allow: letters, digits, dot, hyphen, colon (port sep / IPv6), brackets (IPv6), underscore, percent (scope)
+    host = re.sub(r'[^a-zA-Z0-9.\-:\[\]_%]', '', host)
+    if len(host) > 253:  # Max DNS name length
+        raise ValidationError(f"Hostname too long: {host}")
+    return host
+
+
+class ConfigValidator:
+    """Validate and sanitize configuration options"""
+    
+    VALID_FRAMEWORKS = ['NIST', 'FIPS_140_2', 'BSI_TR_02102', 'ANSSI', 'PRIVACY_FOCUSED']
+    
+    @staticmethod
+    def validate_config(config: Dict) -> Dict:
+        """Validate configuration dictionary"""
+        validated = {}
+        
+        # Scanner configuration
+        scanner_config = config.get('scanner', {})
+        validated['scanner'] = {}
+        
+        # Validate threads
+        threads = scanner_config.get('threads', 20)
+        try:
+            threads = int(threads)
+            if not 1 <= threads <= 500:
+                raise ValueError
+            validated['scanner']['threads'] = threads
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid threads value: {threads}, using default 20")
+            validated['scanner']['threads'] = 20
+        
+        # Validate timeout
+        timeout = scanner_config.get('timeout', 10)
+        try:
+            timeout = int(timeout)
+            if not 1 <= timeout <= 120:
+                raise ValueError
+            validated['scanner']['timeout'] = timeout
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid timeout value: {timeout}, using default 10")
+            validated['scanner']['timeout'] = 10
+        
+        # Validate retry_attempts
+        retry = scanner_config.get('retry_attempts', 3)
+        try:
+            retry = int(retry)
+            if not 1 <= retry <= 10:
+                raise ValueError
+            validated['scanner']['retry_attempts'] = retry
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid retry_attempts value: {retry}, using default 3")
+            validated['scanner']['retry_attempts'] = 3
+        
+        # Validate dns_cache_ttl
+        dns_ttl = scanner_config.get('dns_cache_ttl', 300)
+        try:
+            dns_ttl = int(dns_ttl)
+            if not 60 <= dns_ttl <= 3600:
+                raise ValueError
+            validated['scanner']['dns_cache_ttl'] = dns_ttl
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid dns_cache_ttl value: {dns_ttl}, using default 300")
+            validated['scanner']['dns_cache_ttl'] = 300
+
+        # Validate banner_timeout (optional — None = min(timeout, 5))
+        banner_timeout = scanner_config.get('banner_timeout', None)
+        if banner_timeout is not None:
+            try:
+                banner_timeout = int(banner_timeout)
+                if not 1 <= banner_timeout <= 30:
+                    raise ValueError
+                validated['scanner']['banner_timeout'] = banner_timeout
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid banner_timeout value: {banner_timeout}, ignoring (valid range: 1-30)")
+
+        # Validate rate_limit (optional — None = unlimited)
+        rate_limit = scanner_config.get('rate_limit', None)
+        if rate_limit is not None:
+            try:
+                rate_limit = float(rate_limit)
+                if not 0.1 <= rate_limit <= 1000:
+                    raise ValueError
+                validated['scanner']['rate_limit'] = rate_limit
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid rate_limit value: {rate_limit}, ignoring (valid range: 0.1-1000)")
+
+        # Validate strict_host_key_checking (optional — default: accept-new)
+        _SSHKC_VALUES = ('yes', 'no', 'accept-new')
+        sshkc = scanner_config.get('strict_host_key_checking', 'accept-new')
+        if sshkc in _SSHKC_VALUES:
+            validated['scanner']['strict_host_key_checking'] = sshkc
+        else:
+            logger.warning(f"Invalid strict_host_key_checking value: {sshkc!r}, "
+                           f"using 'accept-new' (valid: {', '.join(_SSHKC_VALUES)})")
+            validated['scanner']['strict_host_key_checking'] = 'accept-new'
+
+        # Compliance configuration (optional — no framework = no compliance check)
+        compliance_config = config.get('compliance', {})
+        validated['compliance'] = {}
+
+        framework = compliance_config.get('framework', None)
+        if framework is not None:
+            if framework in ConfigValidator.VALID_FRAMEWORKS:
+                validated['compliance']['framework'] = framework
+            else:
+                logger.warning(f"Invalid compliance framework: {framework}, ignoring")
+
+        return validated
 
 
 def retry_on_failure(max_attempts: int = 3, backoff_factor: float = 2.0, exceptions: Tuple = None):
     """Decorator for retry logic with exponential backoff"""
     if exceptions is None:
-        exceptions = (subprocess.TimeoutExpired, subprocess.CalledProcessError, ConnectionError)
+        exceptions = (subprocess.TimeoutExpired, subprocess.CalledProcessError, SSHConnectionError)
     
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             last_exception = None
+            retry_count = 0
             
             for attempt in range(max_attempts):
                 try:
                     return func(*args, **kwargs)
                 except exceptions as e:
                     last_exception = e
+                    retry_count += 1
                     
-                    if attempt < max_attempts - 1:  # Don't sleep on last attempt
+                    if attempt < max_attempts - 1:
                         sleep_time = backoff_factor ** attempt
                         logger.debug(f"Attempt {attempt + 1} failed: {e}. Retrying in {sleep_time:.1f}s...")
                         time.sleep(sleep_time)
@@ -176,15 +489,45 @@ class NSABackdoorDetector:
             'ecdsa-sha2-nistp384': {
                 'risk': 'HIGH',
                 'reason': 'ECDSA with NIST P-384 - potential NSA backdoor in curve',
-                'alternative': 'ssh-ed25519', 
+                'alternative': 'ssh-ed25519',
                 'reference': 'NSA Suite B cryptography concerns'
             },
             'ecdsa-sha2-nistp521': {
                 'risk': 'HIGH',
                 'reason': 'ECDSA with NIST P-521 - potential NSA backdoor in curve',
                 'alternative': 'ssh-ed25519',
-                'reference': 'NSA Suite B cryptography concerns' 
-            }
+                'reference': 'NSA Suite B cryptography concerns'
+            },
+            'ecdsa-sha2-nistp256-cert-v01@openssh.com': {
+                'risk': 'HIGH',
+                'reason': 'ECDSA certificate with NIST P-256 - same curve concerns',
+                'alternative': 'ssh-ed25519-cert-v01@openssh.com',
+                'reference': 'NSA Suite B cryptography concerns'
+            },
+            'ecdsa-sha2-nistp384-cert-v01@openssh.com': {
+                'risk': 'HIGH',
+                'reason': 'ECDSA certificate with NIST P-384 - same curve concerns',
+                'alternative': 'ssh-ed25519-cert-v01@openssh.com',
+                'reference': 'NSA Suite B cryptography concerns'
+            },
+            'ecdsa-sha2-nistp521-cert-v01@openssh.com': {
+                'risk': 'HIGH',
+                'reason': 'ECDSA certificate with NIST P-521 - same curve concerns',
+                'alternative': 'ssh-ed25519-cert-v01@openssh.com',
+                'reference': 'NSA Suite B cryptography concerns'
+            },
+            'sk-ecdsa-sha2-nistp256@openssh.com': {
+                'risk': 'HIGH',
+                'reason': 'FIDO/SK ECDSA with NIST P-256 - same curve concerns',
+                'alternative': 'sk-ssh-ed25519@openssh.com',
+                'reference': 'NSA Suite B cryptography concerns'
+            },
+            'sk-ecdsa-sha2-nistp256-cert-v01@openssh.com': {
+                'risk': 'HIGH',
+                'reason': 'FIDO/SK ECDSA certificate with NIST P-256 - same curve concerns',
+                'alternative': 'sk-ssh-ed25519-cert-v01@openssh.com',
+                'reference': 'NSA Suite B cryptography concerns'
+            },
         },
         'cipher': {
             # Historical NSA involvement
@@ -196,30 +539,26 @@ class NSABackdoorDetector:
             }
         },
         'mac': {
-            # Potential concerns with certain implementations
             'hmac-sha1': {
                 'risk': 'MEDIUM',
                 'reason': 'SHA-1 developed with NSA involvement, collision attacks',
                 'alternative': 'hmac-sha2-256-etm@openssh.com',
                 'reference': 'SHA-1 cryptanalysis and NSA design'
-            }
-        }
-    }
-    
-    # Known compromised/backdoored algorithms
-    CONFIRMED_BACKDOORS = {
-        'dual_ec_drbg': {
-            'risk': 'CRITICAL',
-            'reason': 'Confirmed NSA backdoor in random number generator',
-            'status': 'CONFIRMED_BACKDOOR',
-            'reference': 'NIST SP 800-90A, Snowden documents'
+            },
+            'hmac-sha1-etm@openssh.com': {
+                'risk': 'MEDIUM',
+                'reason': 'SHA-1 with NSA involvement (ETM variant)',
+                'alternative': 'hmac-sha2-256-etm@openssh.com',
+                'reference': 'SHA-1 cryptanalysis and NSA design'
+            },
         }
     }
     
     @classmethod
-    def check_nsa_backdoor_risk(cls, algorithms: Dict[str, List[SSHAlgorithmInfo]]) -> Dict:
+    def check_nsa_backdoor_risk(cls, algorithms: Dict[str, List[SSHAlgorithmInfo]], check_enabled: bool = True) -> Dict:
         """Check for algorithms with suspected NSA backdoors"""
         backdoor_analysis = {
+            'enabled': check_enabled,
             'high_risk_algorithms': [],
             'medium_risk_algorithms': [],
             'confirmed_backdoors': [],
@@ -227,6 +566,10 @@ class NSABackdoorDetector:
             'overall_risk_score': 0,
             'trusted_alternatives': []
         }
+        
+        if not check_enabled:
+            backdoor_analysis['status'] = 'disabled'
+            return backdoor_analysis
         
         total_algorithms = 0
         risky_algorithms = 0
@@ -280,39 +623,6 @@ class NSABackdoorDetector:
         ]
         
         return backdoor_analysis
-    
-    @classmethod
-    def get_algorithm_trustworthiness(cls, algorithm: str, algo_type: str) -> Dict:
-        """Get detailed trustworthiness assessment for specific algorithm"""
-        if algo_type in cls.SUSPECTED_NSA_ALGORITHMS and algorithm in cls.SUSPECTED_NSA_ALGORITHMS[algo_type]:
-            return {
-                'trusted': False,
-                'risk_level': cls.SUSPECTED_NSA_ALGORITHMS[algo_type][algorithm]['risk'],
-                'concerns': cls.SUSPECTED_NSA_ALGORITHMS[algo_type][algorithm]['reason'],
-                'alternative': cls.SUSPECTED_NSA_ALGORITHMS[algo_type][algorithm]['alternative']
-            }
-        
-        # Safe algorithms (independently developed)
-        safe_algorithms = {
-            'curve25519-sha256', 'curve25519-sha256@libssh.org',
-            'ssh-ed25519', 'chacha20-poly1305@openssh.com',
-            'aes256-gcm@openssh.com', 'aes128-gcm@openssh.com'
-        }
-        
-        if algorithm in safe_algorithms:
-            return {
-                'trusted': True,
-                'risk_level': 'LOW',
-                'concerns': 'None - independently developed',
-                'alternative': None
-            }
-        
-        return {
-            'trusted': None,  # Unknown
-            'risk_level': 'UNKNOWN',
-            'concerns': 'No specific intelligence concerns known',
-            'alternative': None
-        }
 
 
 class ComplianceFramework:
@@ -332,7 +642,14 @@ class ComplianceFramework:
                 'hmac-sha2-256-etm@openssh.com', 'hmac-sha2-512-etm@openssh.com'
             ],
             'forbidden_mac': [
-                'hmac-md5', 'hmac-md5-96', 'hmac-sha1', 'hmac-sha1-96', 'umac-64'
+                # Non-ETM (MAC-then-Encrypt, vulnerable to padding oracle attacks)
+                'hmac-sha2-256', 'hmac-sha2-512', 'umac-128@openssh.com',
+                # SHA-1 based (NSA involvement, collision attacks known)
+                'hmac-sha1', 'hmac-sha1-96', 'hmac-sha1-etm@openssh.com', 'hmac-sha1-96-etm@openssh.com',
+                # MD5 based (broken)
+                'hmac-md5', 'hmac-md5-96', 'hmac-md5-etm@openssh.com', 'hmac-md5-96-etm@openssh.com',
+                # 64-bit UMAC (tag too short)
+                'umac-64', 'umac-64@openssh.com', 'umac-64-etm@openssh.com',
             ],
             'required_kex': [
                 'curve25519-sha256', 'curve25519-sha256@libssh.org'
@@ -340,47 +657,52 @@ class ComplianceFramework:
             'forbidden_kex': [
                 'diffie-hellman-group1-sha1', 'diffie-hellman-group14-sha1',
                 'diffie-hellman-group-exchange-sha1',
-                # NSA-suspicious algorithms
+                # NSA-suspicious NIST curves
                 'ecdh-sha2-nistp256', 'ecdh-sha2-nistp384', 'ecdh-sha2-nistp521'
             ],
             'required_hostkey': [
                 'ssh-ed25519'
             ],
             'forbidden_hostkey': [
-                'ssh-dss', 'ssh-rsa',
-                # NSA-suspicious algorithms  
-                'ecdsa-sha2-nistp256', 'ecdsa-sha2-nistp384', 'ecdsa-sha2-nistp521'
+                # DSA (broken)
+                'ssh-dss', 'ssh-dss-cert-v01@openssh.com',
+                # RSA (weak if < 2048 bit; cert chains not auditable)
+                'ssh-rsa', 'ssh-rsa-cert-v01@openssh.com',
+                # NSA NIST ECDSA — plain, cert, and FIDO/SK variants
+                'ecdsa-sha2-nistp256', 'ecdsa-sha2-nistp384', 'ecdsa-sha2-nistp521',
+                'ecdsa-sha2-nistp256-cert-v01@openssh.com',
+                'ecdsa-sha2-nistp384-cert-v01@openssh.com',
+                'ecdsa-sha2-nistp521-cert-v01@openssh.com',
+                'sk-ecdsa-sha2-nistp256@openssh.com',
+                'sk-ecdsa-sha2-nistp256-cert-v01@openssh.com',
             ],
             'minimum_score': 95
         },
         
         'NIST': {
-            'name': 'NIST Cybersecurity Framework',
+            'name': 'NIST SP 800-53 / IR 7966',
             'required_ciphers': [
-                'aes256-gcm@openssh.com', 'aes128-gcm@openssh.com', 
-                'chacha20-poly1305@openssh.com', 'aes256-ctr', 'aes128-ctr'
+                'aes256-ctr', 'aes128-ctr'
             ],
             'forbidden_ciphers': [
-                'des', '3des-cbc', 'blowfish-cbc', 'cast128-cbc', 
+                'des', '3des-cbc', 'blowfish-cbc', 'cast128-cbc',
                 'arcfour', 'arcfour128', 'arcfour256', 'aes128-cbc', 'aes192-cbc', 'aes256-cbc'
             ],
             'required_mac': [
-                'hmac-sha2-256-etm@openssh.com', 'hmac-sha2-512-etm@openssh.com',
                 'hmac-sha2-256', 'hmac-sha2-512'
             ],
             'forbidden_mac': [
                 'hmac-md5', 'hmac-md5-96', 'hmac-sha1', 'hmac-sha1-96', 'umac-64'
             ],
             'required_kex': [
-                'curve25519-sha256', 'curve25519-sha256@libssh.org',
-                'ecdh-sha2-nistp256', 'ecdh-sha2-nistp384', 'ecdh-sha2-nistp521'
+                'ecdh-sha2-nistp256'
             ],
             'forbidden_kex': [
                 'diffie-hellman-group1-sha1', 'diffie-hellman-group14-sha1',
                 'diffie-hellman-group-exchange-sha1'
             ],
             'required_hostkey': [
-                'ssh-ed25519', 'ecdsa-sha2-nistp256', 'ecdsa-sha2-nistp384', 'ecdsa-sha2-nistp521'
+                'ecdsa-sha2-nistp256'
             ],
             'forbidden_hostkey': [
                 'ssh-dss', 'ssh-rsa'
@@ -394,7 +716,9 @@ class ComplianceFramework:
                 'aes256-ctr', 'aes192-ctr', 'aes128-ctr'
             ],
             'forbidden_ciphers': [
-                'des', '3des-cbc', 'blowfish-cbc', 'cast128-cbc', 'arcfour', 'arcfour128', 'arcfour256'
+                'des', '3des-cbc', 'blowfish-cbc', 'cast128-cbc', 'arcfour', 'arcfour128', 'arcfour256',
+                # Not FIPS 140-2 approved
+                'chacha20-poly1305@openssh.com',
             ],
             'required_mac': [
                 'hmac-sha2-256', 'hmac-sha2-512'
@@ -403,16 +727,24 @@ class ComplianceFramework:
                 'hmac-md5', 'hmac-md5-96', 'hmac-sha1', 'hmac-sha1-96'
             ],
             'required_kex': [
-                'ecdh-sha2-nistp256', 'ecdh-sha2-nistp384', 'ecdh-sha2-nistp521'
+                'ecdh-sha2-nistp256'
             ],
             'forbidden_kex': [
-                'diffie-hellman-group1-sha1', 'diffie-hellman-group14-sha1'
+                'diffie-hellman-group1-sha1', 'diffie-hellman-group14-sha1',
+                # Not FIPS 140-2 approved (Curve25519 / non-NIST curves)
+                'curve25519-sha256', 'curve25519-sha256@libssh.org',
+                'sntrup761x25519-sha512@openssh.com', 'sntrup761x25519-sha512',
+                'mlkem768x25519-sha256',
             ],
             'required_hostkey': [
-                'ecdsa-sha2-nistp256', 'ecdsa-sha2-nistp384', 'ecdsa-sha2-nistp521'
+                'ecdsa-sha2-nistp256'
             ],
             'forbidden_hostkey': [
-                'ssh-dss'
+                'ssh-dss',
+                'ssh-rsa',  # SHA-1 based signature
+                # Not FIPS 140-2 approved (Ed25519 = Curve25519-based)
+                'ssh-ed25519', 'ssh-ed25519-cert-v01@openssh.com',
+                'sk-ssh-ed25519@openssh.com', 'sk-ssh-ed25519-cert-v01@openssh.com',
             ],
             'minimum_score': 90
         },
@@ -437,7 +769,7 @@ class ComplianceFramework:
             ],
             'forbidden_kex': [
                 'diffie-hellman-group1-sha1', 'diffie-hellman-group14-sha1',
-                'diffie-hellman-group-exchange-sha1', 'diffie-hellman-group-exchange-sha256'
+                'diffie-hellman-group-exchange-sha1',
             ],
             'required_hostkey': [
                 'ssh-ed25519'
@@ -461,10 +793,10 @@ class ComplianceFramework:
                 'hmac-sha2-256-etm@openssh.com', 'hmac-sha2-512-etm@openssh.com'
             ],
             'forbidden_mac': [
-                'hmac-md5', 'hmac-md5-96', 'hmac-sha1', 'hmac-sha1-96', 'umac-64', 'umac-128'
+                'hmac-md5', 'hmac-md5-96', 'hmac-sha1', 'hmac-sha1-96', 'umac-64', 'umac-128@openssh.com'
             ],
             'required_kex': [
-                'curve25519-sha256@libssh.org'
+                'curve25519-sha256', 'curve25519-sha256@libssh.org'
             ],
             'forbidden_kex': [
                 'diffie-hellman-group1-sha1', 'diffie-hellman-group14-sha1',
@@ -481,7 +813,8 @@ class ComplianceFramework:
     }
     
     @classmethod
-    def check_compliance(cls, algorithms: Dict[str, List[SSHAlgorithmInfo]], framework: str) -> Dict[str, bool]:
+    def check_compliance(cls, algorithms: Dict[str, List[SSHAlgorithmInfo]], framework: str,
+                         security_score: int = None) -> Dict[str, bool]:
         """Check compliance against specified framework"""
         if framework not in cls.FRAMEWORKS:
             raise ValueError(f"Unknown framework: {framework}")
@@ -510,7 +843,7 @@ class ComplianceFramework:
                 required_key = f'required_{fw_type}'
                 if required_key in fw:
                     required = set(fw[required_key])
-                    has_required = bool(required & supported)
+                    has_required = required.issubset(supported)
                     compliance_result[f'{fw_type}_has_required'] = has_required
                 
                 # Check forbidden algorithms
@@ -520,12 +853,22 @@ class ComplianceFramework:
                     has_forbidden = bool(forbidden & supported)
                     compliance_result[f'{fw_type}_has_forbidden'] = has_forbidden
         
-        # Overall compliance
-        compliance_result['overall_compliant'] = (
+        # Overall compliance (algorithm checks)
+        algo_compliant = (
             all(v for k, v in compliance_result.items() if 'has_required' in k) and
             not any(v for k, v in compliance_result.items() if 'has_forbidden' in k)
         )
-        
+
+        # Minimum score check
+        min_score = fw.get('minimum_score')
+        if min_score is not None and security_score is not None:
+            compliance_result['minimum_score_required'] = min_score
+            score_ok = security_score >= min_score
+            compliance_result['score_meets_minimum'] = score_ok
+            compliance_result['overall_compliant'] = algo_compliant and score_ok
+        else:
+            compliance_result['overall_compliant'] = algo_compliant
+
         return compliance_result
     
     @classmethod
@@ -539,182 +882,284 @@ class ComplianceFramework:
         return cls.FRAMEWORKS.get(framework, {})
 
 
-class SSHMultiplexer:
-    """SSH connection multiplexing manager"""
+
+class AlgorithmTester:
+    """Handles algorithm testing with parallelization"""
     
-    def __init__(self, base_dir: str = None):
-        self.base_dir = base_dir or tempfile.mkdtemp(prefix='ssh_multiplex_')
-        self.active_connections = {}
-        self.lock = threading.Lock()
-        Path(self.base_dir).mkdir(parents=True, exist_ok=True)
+    def __init__(self, test_function, max_workers: int = 5):
+        self.test_function = test_function
+        self.max_workers = max_workers
+        logger.debug(f"Algorithm tester initialized with {max_workers} workers")
     
-    def get_control_path(self, host: str, port: int) -> str:
-        """Generate control path for SSH multiplexing"""
-        return str(Path(self.base_dir) / f"ssh_{host}_{port}")
-    
-    def establish_master(self, host: str, port: int, timeout: int = 10) -> bool:
-        """Establish SSH master connection"""
-        control_path = self.get_control_path(host, port)
-        
-        with self.lock:
-            if (host, port) in self.active_connections:
-                return True  # Already established
-        
-        cmd = [
-            'ssh',
-            '-o', 'BatchMode=yes',
-            '-o', 'ConnectTimeout=5',
-            '-o', 'StrictHostKeyChecking=no',
-            '-o', 'PreferredAuthentications=none',
-            '-o', 'ControlMaster=yes',
-            '-o', f'ControlPath={control_path}',
-            '-o', 'ControlPersist=30',  # Keep connection for 30 seconds
-            '-o', 'LogLevel=quiet',
-            f'{host}' if port == 22 else f'{host}:{port}',
-            'exit'
-        ]
-        
-        try:
-            result = subprocess.run(cmd, capture_output=True, timeout=timeout, check=False)
-            
-            with self.lock:
-                if result.returncode in [0, 255]:  # 255 is normal for auth failure
-                    self.active_connections[(host, port)] = control_path
-                    return True
-                return False
-                
-        except subprocess.TimeoutExpired:
-            return False
-    
-    def test_with_multiplex(self, host: str, port: int, algorithm: str, algo_type: str, timeout: int = 10) -> bool:
-        """Test algorithm using multiplexed connection"""
-        control_path = self.get_control_path(host, port)
-        
-        # Map algorithm types to SSH options
-        ssh_options = {
-            'cipher': f'Ciphers={algorithm}',
-            'mac': f'MACs={algorithm}',
-            'kex': f'KexAlgorithms={algorithm}',
-            'key': f'HostKeyAlgorithms={algorithm}'
-        }
-        
-        if algo_type not in ssh_options:
-            return False
-        
-        cmd = [
-            'ssh',
-            '-o', 'BatchMode=yes',
-            '-o', 'ConnectTimeout=3',
-            '-o', 'StrictHostKeyChecking=no',
-            '-o', ssh_options[algo_type],
-            '-o', 'PreferredAuthentications=none',
-            '-o', 'ControlMaster=no',
-            '-o', f'ControlPath={control_path}',
-            '-o', 'LogLevel=quiet',
-            f'{host}' if port == 22 else f'{host}:{port}',
-            'exit'
-        ]
-        
-        try:
-            result = subprocess.run(cmd, capture_output=True, timeout=timeout, check=False)
-            
-            # Check for algorithm-specific rejection messages
-            stderr_lower = result.stderr.lower()
-            rejection_patterns = [
-                'no matching cipher found',
-                'no matching mac found', 
-                'no matching key exchange method found',
-                'no matching host key type found',
-                'no mutual signature algorithm'
-            ]
-            
-            return not any(pattern in stderr_lower for pattern in rejection_patterns)
-            
-        except subprocess.TimeoutExpired:
-            return False
-    
-    def cleanup(self):
-        """Clean up multiplexed connections and temp directory"""
-        with self.lock:
-            for (host, port), control_path in self.active_connections.items():
+    def test_algorithms_parallel(self, host: str, port: int, algorithms: Dict[str, List[str]],
+                                  line_callback=None) -> Dict[str, List[SSHAlgorithmInfo]]:
+        """Test algorithms in parallel for a single host"""
+        results = {}
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_algo = {}
+
+            for algo_type, algo_list in algorithms.items():
+                results[algo_type] = []
+                for algorithm in algo_list:
+                    future = executor.submit(self.test_function, host, algorithm, algo_type, port)
+                    future_to_algo[future] = (algo_type, algorithm)
+
+            logger.debug(f"Submitted {len(future_to_algo)} algorithm tests for {host}:{port}")
+
+            for future in as_completed(future_to_algo):
+                algo_type, algorithm = future_to_algo[future]
                 try:
-                    # Close master connection
-                    subprocess.run([
-                        'ssh', '-o', f'ControlPath={control_path}', 
-                        '-O', 'exit', f'{host}:{port}'
-                    ], capture_output=True, timeout=5)
-                except:
-                    pass
-            
-            self.active_connections.clear()
-        
-        # Remove temp directory
-        try:
-            shutil.rmtree(self.base_dir)
-        except:
-            pass
+                    is_supported = future.result()
+                    results[algo_type].append(SSHAlgorithmInfo(
+                        name=algorithm, type=algo_type, supported=is_supported
+                    ))
+                    if line_callback:
+                        line_callback(algo_type, algorithm, is_supported)
+                    logger.debug(f"Algorithm test completed: {algorithm} ({'supported' if is_supported else 'not supported'})")
+                except Exception as e:
+                    logger.error(f"Error testing {algorithm}: {e}")
+                    results[algo_type].append(SSHAlgorithmInfo(
+                        name=algorithm, type=algo_type, supported=False
+                    ))
+
+        return results
 
 
 class SSHEnhancedScanner:
     """Enhanced SSH scanner with all advanced features"""
-    
+
+    WEAK_ALGORITHMS: Dict[str, List[str]] = {
+        'cipher': [
+            'des', '3des-cbc', 'blowfish-cbc', 'cast128-cbc',
+            'arcfour', 'arcfour128', 'arcfour256',
+            'aes128-cbc', 'aes192-cbc', 'aes256-cbc',
+        ],
+        'mac': [
+            'hmac-md5', 'hmac-md5-96', 'hmac-sha1', 'hmac-sha1-96', 'umac-64',
+            'hmac-md5-etm@openssh.com', 'hmac-md5-96-etm@openssh.com',
+            'hmac-sha1-etm@openssh.com', 'hmac-sha1-96-etm@openssh.com',
+            'umac-64@openssh.com', 'umac-64-etm@openssh.com',
+        ],
+        'kex': [
+            'diffie-hellman-group1-sha1', 'diffie-hellman-group14-sha1',
+            'diffie-hellman-group-exchange-sha1',
+        ],
+        'key': [
+            'ssh-dss', 'ssh-rsa',
+            'ssh-dss-cert-v01@openssh.com', 'ssh-rsa-cert-v01@openssh.com',
+        ],
+    }
+
+    # Comprehensive list of all known SSH algorithms (including those removed from
+    # modern OpenSSH). This is the authoritative test set — not limited to what the
+    # local ssh client reports via `ssh -Q`.
+    KNOWN_ALGORITHMS: Dict[str, List[str]] = {
+        'cipher': [
+            # Modern / recommended
+            'chacha20-poly1305@openssh.com',
+            'aes256-gcm@openssh.com',
+            'aes128-gcm@openssh.com',
+            'aes256-ctr',
+            'aes192-ctr',
+            'aes128-ctr',
+            # Weak CBC (still seen on legacy servers)
+            'aes256-cbc',
+            'aes192-cbc',
+            'aes128-cbc',
+            '3des-cbc',
+            'blowfish-cbc',
+            'cast128-cbc',
+            # Broken legacy (removed from OpenSSH 8.5+)
+            'arcfour256',
+            'arcfour128',
+            'arcfour',
+            'des',
+        ],
+        'mac': [
+            # Modern ETM (encrypt-then-MAC)
+            'hmac-sha2-512-etm@openssh.com',
+            'hmac-sha2-256-etm@openssh.com',
+            'umac-128-etm@openssh.com',
+            # Modern non-ETM
+            'hmac-sha2-512',
+            'hmac-sha2-256',
+            'umac-128@openssh.com',
+            # Weak
+            'hmac-sha1',
+            'hmac-sha1-etm@openssh.com',
+            'umac-64-etm@openssh.com',
+            'umac-64@openssh.com',
+            'hmac-sha1-96',
+            'hmac-md5',
+            'hmac-md5-etm@openssh.com',
+            'hmac-md5-96',
+            'hmac-md5-96-etm@openssh.com',
+        ],
+        'kex': [
+            # Modern / recommended (including post-quantum)
+            'mlkem768x25519-sha256',
+            'sntrup761x25519-sha512@openssh.com',
+            'curve25519-sha256',
+            'curve25519-sha256@libssh.org',
+            'diffie-hellman-group18-sha512',
+            'diffie-hellman-group16-sha512',
+            'diffie-hellman-group14-sha256',
+            'diffie-hellman-group-exchange-sha256',
+            # NSA / NIST curves
+            'ecdh-sha2-nistp521',
+            'ecdh-sha2-nistp384',
+            'ecdh-sha2-nistp256',
+            # Weak / deprecated
+            'diffie-hellman-group-exchange-sha1',
+            'diffie-hellman-group14-sha1',
+            'diffie-hellman-group1-sha1',
+        ],
+        'key': [
+            # Modern / recommended
+            'ssh-ed25519',
+            'ssh-ed25519-cert-v01@openssh.com',
+            'sk-ssh-ed25519@openssh.com',
+            'sk-ssh-ed25519-cert-v01@openssh.com',
+            'rsa-sha2-512',
+            'rsa-sha2-256',
+            'rsa-sha2-512-cert-v01@openssh.com',
+            'rsa-sha2-256-cert-v01@openssh.com',
+            # NSA / NIST curves
+            'ecdsa-sha2-nistp256',
+            'ecdsa-sha2-nistp384',
+            'ecdsa-sha2-nistp521',
+            'ecdsa-sha2-nistp256-cert-v01@openssh.com',
+            'ecdsa-sha2-nistp384-cert-v01@openssh.com',
+            'ecdsa-sha2-nistp521-cert-v01@openssh.com',
+            'sk-ecdsa-sha2-nistp256@openssh.com',
+            'sk-ecdsa-sha2-nistp256-cert-v01@openssh.com',
+            # Weak / deprecated
+            'ssh-rsa',
+            'ssh-rsa-cert-v01@openssh.com',
+            'ssh-dss',
+            'ssh-dss-cert-v01@openssh.com',
+        ],
+    }
+
     def __init__(self, config: Dict = None):
         """Initialize scanner with configuration"""
-        self.config = config or {}
+        logger.debug("Initializing SSH Enhanced Scanner")
         
-        # Core settings
-        self.timeout = self.config.get('timeout', 10)
-        self.max_workers = self.config.get('threads', 20)
-        self.use_multiplexing = self.config.get('use_multiplexing', True)
-        self.retry_attempts = self.config.get('retry_attempts', 3)
-        self.dns_cache_ttl = self.config.get('dns_cache_ttl', 300)
+        # Load and validate configuration
+        if config is None:
+            config = self._load_default_config()
         
+        self.config = ConfigValidator.validate_config(config)
+        
+        # Extract validated settings
+        scanner_config = self.config.get('scanner', {})
+        self.timeout = scanner_config.get('timeout', 10)
+        self.max_workers = scanner_config.get('threads', 20)
+        self.retry_attempts = scanner_config.get('retry_attempts', 3)
+        self.dns_cache_ttl = scanner_config.get('dns_cache_ttl', 300)
+
         # Initialize components
-        self.dns_cache = DNSCache(ttl=self.dns_cache_ttl)
-        self.multiplexer = SSHMultiplexer() if self.use_multiplexing else None
+        self.dns_cache = EnhancedDNSCache(ttl=self.dns_cache_ttl)
         self.lock = threading.Lock()
-        
+        self.show_nsa_warnings: bool = True  # controls display only; analysis always runs
+
         # Compliance framework
-        self.compliance_framework = self.config.get('compliance_framework', None)
-        
+        compliance_config = self.config.get('compliance', {})
+        self.compliance_framework = compliance_config.get('framework', None)
+
+        self._local_algorithms_cache: Optional[Dict[str, List[str]]] = None
+        self.summary_only: bool = False
+        self.spinner: Optional['Spinner'] = None
+        self.filter_algo: Set[str] = set()   # e.g. {'supported', 'nsa'}
+        self.filter_hosts: Set[str] = set()  # e.g. {'failed', 'error'}
+        self._output_buffer: Dict[str, List[str]] = {}
+        self.rate_limit: Optional[float] = scanner_config.get('rate_limit', None)
+        self.banner_timeout: Optional[int] = scanner_config.get('banner_timeout', None)
+        self.strict_host_key_checking: str = scanner_config.get('strict_host_key_checking', 'accept-new')
+
         logger.info(f"Initialized scanner with {self.max_workers} threads, "
-                   f"multiplexing={'enabled' if self.use_multiplexing else 'disabled'}")
+                   f"DNS cache TTL={self.dns_cache_ttl}s")
+    
+    def _load_default_config(self) -> Dict:
+        """Load configuration from default locations"""
+        config_locations = [
+            Path('/etc/sshscan/config.toml'),
+            Path('/etc/sshscan.toml'),
+            Path.home() / '.sshscan' / 'config.toml',
+            Path.home() / '.sshscan.toml'
+        ]
+        
+        for config_path in config_locations:
+            if config_path.exists():
+                try:
+                    logger.info(f"Loading configuration from {config_path}")
+                    return toml.load(config_path)
+                except Exception as e:
+                    logger.warning(f"Failed to load config from {config_path}: {e}")
+        
+        logger.info("No configuration file found, using defaults")
+        return {}
     
     def __enter__(self):
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.multiplexer:
-            self.multiplexer.cleanup()
+        if self.dns_cache:
+            self.dns_cache.stop()
     
-    def parse_host_string(self, host_string: str) -> Tuple[str, int]:
-        """Parse host:port string with DNS caching"""
-        if ':' in host_string:
-            host, port_str = host_string.rsplit(':', 1)
-            try:
-                port = int(port_str)
-            except ValueError:
-                port = 22
+    def parse_host_string(self, host_string: str, default_port: int = 22) -> Tuple[str, int]:
+        """Parse host:port string with DNS caching and validation"""
+        # Basic validation
+        host_string = host_string.strip()
+        if not host_string:
+            raise ValidationError("Empty host string")
+        
+        logger.debug(f"Parsing host string: {host_string}")
+        
+        # Check for IPv6 format [::1]:22
+        ipv6_match = re.match(r'^\[([^\]]+)\]:(\d+)$', host_string)
+        if ipv6_match:
+            host = ipv6_match.group(1)
+            port = int(ipv6_match.group(2))
         else:
-            host = host_string
-            port = 22
+            # Standard host:port format
+            if ':' in host_string and not validate_ip_address(host_string):
+                host, port_str = host_string.rsplit(':', 1)
+                try:
+                    port = validate_port(port_str)
+                except ValidationError:
+                    # Not a valid port, treat whole string as hostname
+                    host = host_string
+                    port = default_port
+            else:
+                host = host_string
+                port = default_port
+        
+        # Sanitize and validate host
+        host = sanitize_host_input(host)
+        port = validate_port(port)
         
         # Resolve hostname using DNS cache
         resolved_ip = self.dns_cache.resolve(host.strip())
         if resolved_ip:
+            logger.debug(f"Parsed and resolved {host_string} -> {resolved_ip}:{port}")
             return resolved_ip, port
         else:
             logger.warning(f"DNS resolution failed for {host}, using hostname directly")
             return host.strip(), port
     
-    def load_hosts_from_file(self, file_path: str) -> List[Tuple[str, int]]:
-        """Load hosts from various file formats with error handling"""
+    def load_hosts_from_file(self, file_path: str, default_port: int = 22) -> List[Tuple[str, int]]:
+        """Load hosts from various file formats with error handling and deduplication"""
         file_path = Path(file_path)
         
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
         
+        logger.debug(f"Loading hosts from file: {file_path}")
         hosts = []
+        seen_hosts = set()
+        _skipped = 0
         
         try:
             if file_path.suffix.lower() == '.json':
@@ -723,12 +1168,22 @@ class SSHEnhancedScanner:
                     if isinstance(data, list):
                         for item in data:
                             if isinstance(item, str):
-                                hosts.append(self.parse_host_string(item))
+                                host_tuple = self.parse_host_string(item, default_port)
+                                if host_tuple not in seen_hosts:
+                                    hosts.append(host_tuple)
+                                    seen_hosts.add(host_tuple)
+                                else:
+                                    _skipped += 1
                             elif isinstance(item, dict) and 'host' in item:
-                                host = item['host']
-                                port = item.get('port', 22)
+                                host = sanitize_host_input(item['host'])
+                                port = validate_port(item.get('port', default_port))
                                 resolved_ip = self.dns_cache.resolve(host)
-                                hosts.append((resolved_ip or host, port))
+                                host_tuple = (resolved_ip or host, port)
+                                if host_tuple not in seen_hosts:
+                                    hosts.append(host_tuple)
+                                    seen_hosts.add(host_tuple)
+                                else:
+                                    _skipped += 1
             
             elif file_path.suffix.lower() in ['.yml', '.yaml']:
                 with open(file_path, 'r', encoding='utf-8') as f:
@@ -736,12 +1191,22 @@ class SSHEnhancedScanner:
                     if isinstance(data, list):
                         for item in data:
                             if isinstance(item, str):
-                                hosts.append(self.parse_host_string(item))
+                                host_tuple = self.parse_host_string(item, default_port)
+                                if host_tuple not in seen_hosts:
+                                    hosts.append(host_tuple)
+                                    seen_hosts.add(host_tuple)
+                                else:
+                                    _skipped += 1
                             elif isinstance(item, dict) and 'host' in item:
-                                host = item['host']
-                                port = item.get('port', 22)
+                                host = sanitize_host_input(item['host'])
+                                port = validate_port(item.get('port', default_port))
                                 resolved_ip = self.dns_cache.resolve(host)
-                                hosts.append((resolved_ip or host, port))
+                                host_tuple = (resolved_ip or host, port)
+                                if host_tuple not in seen_hosts:
+                                    hosts.append(host_tuple)
+                                    seen_hosts.add(host_tuple)
+                                else:
+                                    _skipped += 1
             
             elif file_path.suffix.lower() == '.csv':
                 with open(file_path, 'r', encoding='utf-8') as f:
@@ -750,67 +1215,108 @@ class SSHEnhancedScanner:
                         if row and not row[0].startswith('#'):
                             if len(row) >= 2:
                                 try:
-                                    host = row[0].strip()
-                                    port = int(row[1].strip())
+                                    host = sanitize_host_input(row[0].strip())
+                                    port = validate_port(row[1].strip())
                                     resolved_ip = self.dns_cache.resolve(host)
-                                    hosts.append((resolved_ip or host, port))
-                                except ValueError:
-                                    resolved_ip = self.dns_cache.resolve(host)
-                                    hosts.append((resolved_ip or host, 22))
+                                    host_tuple = (resolved_ip or host, port)
+                                    if host_tuple not in seen_hosts:
+                                        hosts.append(host_tuple)
+                                        seen_hosts.add(host_tuple)
+                                except (ValueError, ValidationError) as e:
+                                    logger.warning(f"Invalid entry in CSV: {row} - {e}")
                             else:
-                                hosts.append(self.parse_host_string(row[0]))
+                                host_tuple = self.parse_host_string(row[0], default_port)
+                                if host_tuple not in seen_hosts:
+                                    hosts.append(host_tuple)
+                                    seen_hosts.add(host_tuple)
+                                else:
+                                    _skipped += 1
             
             else:  # .txt or other text files
                 with open(file_path, 'r', encoding='utf-8') as f:
-                    for line in f:
+                    for line_num, line in enumerate(f, 1):
                         line = line.strip()
                         if line and not line.startswith('#'):
-                            hosts.append(self.parse_host_string(line))
+                            try:
+                                host_tuple = self.parse_host_string(line, default_port)
+                                if host_tuple not in seen_hosts:
+                                    hosts.append(host_tuple)
+                                    seen_hosts.add(host_tuple)
+                                else:
+                                    _skipped += 1
+                            except ValidationError as e:
+                                logger.warning(f"Line {line_num}: Invalid host entry '{line}' - {e}")
         
         except Exception as e:
             raise ValueError(f"Error parsing file {file_path}: {e}")
         
-        logger.info(f"Loaded {len(hosts)} hosts from {file_path}")
+        logger.info(f"Loaded {len(hosts)} unique hosts from {file_path}")
+        if _skipped > 0:
+            logger.info(f"Skipped {_skipped} duplicate entries")
+        
         return hosts
     
     @retry_on_failure(max_attempts=3, backoff_factor=1.5)
     def get_local_ssh_algorithms(self) -> Dict[str, List[str]]:
-        """Query local SSH client for supported algorithms with retry"""
-        algorithm_types = ['cipher', 'mac', 'kex', 'key']
-        results = {}
-        
-        for algo_type in algorithm_types:
+        """Return the full set of algorithms to test.
+
+        Uses KNOWN_ALGORITHMS as the authoritative base (covers legacy algorithms
+        removed from modern OpenSSH). Any additional algorithms reported by the
+        local client via `ssh -Q` that are not already in the list are appended.
+        """
+        if self._local_algorithms_cache is not None:
+            return self._local_algorithms_cache
+
+        if not shutil.which('ssh'):
+            raise SSHScannerError("SSH client not found. Please install OpenSSH.")
+
+        logger.debug("Building algorithm test list from KNOWN_ALGORITHMS + ssh -Q")
+
+        results: Dict[str, List[str]] = {}
+        for algo_type, known_list in self.KNOWN_ALGORITHMS.items():
+            # Start with the comprehensive hardcoded list
+            combined: List[str] = list(known_list)
+            known_set: set = set(known_list)
+
+            # Supplement with anything the local client knows that we don't
             try:
-                result = subprocess.run(
+                proc = subprocess.run(
                     ['ssh', '-Q', algo_type],
                     capture_output=True,
                     text=True,
                     timeout=self.timeout,
-                    check=True
+                    check=True,
                 )
-                results[algo_type] = [
-                    line.strip() for line in result.stdout.split('\n') 
-                    if line.strip()
-                ]
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
-                logger.error(f"Error querying {algo_type}: {e}")
-                results[algo_type] = []
-        
+                for line in proc.stdout.split('\n'):
+                    algo = line.strip()
+                    if algo and algo not in known_set:
+                        combined.append(algo)
+                        known_set.add(algo)
+                        logger.debug(f"ssh -Q added unknown {algo_type}: {algo}")
+            except subprocess.CalledProcessError as e:
+                logger.warning(f"ssh -Q {algo_type} failed: {e}")
+            except subprocess.TimeoutExpired:
+                logger.warning(f"ssh -Q {algo_type} timed out")
+            except FileNotFoundError:
+                raise SSHScannerError("SSH client not found")
+
+            results[algo_type] = combined
+            logger.debug(f"{algo_type}: {len(combined)} algorithms to test")
+
+        self._local_algorithms_cache = results
         return results
     
     @retry_on_failure(max_attempts=2, backoff_factor=1.0)
     def test_algorithm_connection(self, host: str, algorithm: str, algo_type: str, port: int = 22) -> bool:
-        """Test algorithm with multiplexing and retry logic"""
-        if self.use_multiplexing and self.multiplexer:
-            # Try to establish master connection if not exists
-            if (host, port) not in self.multiplexer.active_connections:
-                self.multiplexer.establish_master(host, port, self.timeout)
-            
-            # Use multiplexed connection if available
-            if (host, port) in self.multiplexer.active_connections:
-                return self.multiplexer.test_with_multiplex(host, port, algorithm, algo_type, self.timeout)
-        
-        # Fallback to regular SSH connection
+        """Test whether a remote SSH server supports a specific algorithm.
+
+        Always uses a fresh SSH connection — never a multiplexed one.
+        Multiplexed slaves reuse the master's already-negotiated session and
+        completely ignore Ciphers/MACs/KexAlgorithms/HostKeyAlgorithms options,
+        which would cause false positives for every algorithm the local client
+        supports regardless of what the server actually accepts.
+        """
+        logger.debug(f"Testing {algorithm} ({algo_type}) on {host}:{port}")
         ssh_options = {
             'cipher': f'Ciphers={algorithm}',
             'mac': f'MACs={algorithm}',
@@ -821,15 +1327,21 @@ class SSHEnhancedScanner:
         if algo_type not in ssh_options:
             return False
         
+        # Validate inputs
+        host = sanitize_host_input(host)
+        port = validate_port(port)
+        
         cmd = [
             'ssh',
             '-o', 'BatchMode=yes',
-            '-o', 'ConnectTimeout=3',
-            '-o', 'StrictHostKeyChecking=no',
+            '-o', f'ConnectTimeout={self.timeout}',
+            '-o', f'StrictHostKeyChecking={self.strict_host_key_checking}',
             '-o', ssh_options[algo_type],
             '-o', 'PreferredAuthentications=none',
-            '-o', 'LogLevel=quiet',
-            f'{host}' if port == 22 else f'{host}:{port}',
+            '-o', 'LogLevel=ERROR',
+            '-o', 'UserKnownHostsFile=/dev/null',
+            '-p', str(port),
+            host,
             'exit'
         ]
         
@@ -843,174 +1355,323 @@ class SSHEnhancedScanner:
             
             stderr_lower = result.stderr.lower()
             rejection_patterns = [
-                'no matching cipher found',
-                'no matching mac found', 
-                'no matching key exchange method found',
-                'no matching host key type found',
-                'no mutual signature algorithm'
+                # Server-side negotiation failures
+                b'no matching cipher found',
+                b'no matching mac found',
+                b'no matching key exchange method found',
+                b'no matching host key type found',
+                b'no mutual signature algorithm',
+                # Client-side: local ssh doesn't support this algorithm
+                # (e.g. arcfour removed in OpenSSH 8.5+, blowfish in 7.6+)
+                b'bad ssh2 cipher spec',
+                b'bad ssh2 mac spec',
+                b'bad ssh2 kex spec',
+                b'unknown cipher type',
+                b'unknown mac type',
+                b'unknown key type',
+                b'unsupported cipher',
             ]
             
-            return not any(pattern in stderr_lower for pattern in rejection_patterns)
+            supported = not any(pattern in stderr_lower for pattern in rejection_patterns)
+            logger.debug(f"Algorithm {algorithm} test result: {'supported' if supported else 'not supported'}")
+            return supported
             
         except subprocess.TimeoutExpired:
+            logger.debug(f"Timeout testing {algorithm} on {host}:{port}")
+            return False
+        except Exception as e:
+            logger.error(f"Error testing {algorithm} on {host}:{port}: {e}")
             return False
     
     @retry_on_failure(max_attempts=2, backoff_factor=1.0)
-    def scan_ssh_banner(self, host: str, port: int = 22) -> Optional[str]:
-        """Get SSH banner with retry logic"""
+    def scan_ssh_banner(self, host: str, port: int = 22, timeout: int = None) -> Optional[str]:
+        """Get SSH banner with retry logic and configurable timeout"""
+        if timeout is None:
+            timeout = self.banner_timeout if self.banner_timeout is not None else min(self.timeout, 5)
+        
+        logger.debug(f"Scanning SSH banner for {host}:{port}")
+        
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.settimeout(3)
-                sock.connect((host, port))
-                banner = sock.recv(1024).decode('utf-8', errors='ignore').strip()
+            with socket.create_connection((host, port), timeout=timeout) as sock:
+                banner_raw = sock.recv(1024).decode('utf-8', errors='ignore').strip()
+                # Sanitize: strip control/non-printable chars, truncate
+                banner = ''.join(c for c in banner_raw if c.isprintable() or c == ' ')[:256]
+                logger.debug(f"Banner received from {host}:{port}: {banner[:50]}...")
                 return banner
-        except (socket.error, socket.timeout):
+        except (socket.error, socket.timeout) as e:
+            logger.debug(f"Failed to get banner from {host}:{port}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error getting banner from {host}:{port}: {e}")
             return None
     
+    def _host_passes_filter(self, result: SSHHostResult) -> bool:
+        """Return True if this host result matches the active host filter tokens."""
+        if not self.filter_hosts:
+            return True
+        for token in self.filter_hosts:
+            if token == 'error' and result.status != 'success':
+                return True
+            if token == 'passed' and result.status == 'success':
+                if not self.compliance_framework or result.compliance_status.get('overall_compliant', True):
+                    return True
+            if token == 'failed' and result.status == 'success':
+                if self.compliance_framework and not result.compliance_status.get('overall_compliant', True):
+                    return True
+        return False
+
     def scan_single_host(self, host: str, port: int, explicit_algorithms: List[str] = None) -> SSHHostResult:
-        """Scan single host with all enhancements"""
+        """Scan single host with live per-algorithm output"""
         start_time = time.time()
         result = SSHHostResult(host=host, port=port)
-        
-        try:
-            # Get SSH banner
-            result.ssh_banner = self.scan_ssh_banner(host, port) or ""
-            
-            if explicit_algorithms:
-                # Test only explicit algorithms
-                explicit_results = self.test_explicit_algorithms(host, port, explicit_algorithms)
-                
-                for algo, supported in explicit_results.items():
-                    if 'explicit' not in result.algorithms:
-                        result.algorithms['explicit'] = []
-                    result.algorithms['explicit'].append(
-                        SSHAlgorithmInfo(name=algo, type='explicit', supported=supported)
-                    )
-                
-                total_tested = len(explicit_results)
-                supported_count = sum(1 for supported in explicit_results.values() if supported)
-                result.security_score = (supported_count * 100 // total_tested) if total_tested > 0 else 0
-                
+        host_label = f"{host}:{port}"
+
+        _algo_labels = {
+            'cipher': 'Cipher',
+            'mac': 'MAC',
+            'kex': 'KEX',
+            'key': 'HostKey',
+            'explicit': 'Algorithm',
+        }
+
+        use_buffer = bool(self.filter_hosts) and not self.summary_only
+
+        def _emit(line: str) -> None:
+            """Print line directly or buffer it when host-level filtering is active."""
+            with self.lock:
+                if use_buffer:
+                    self._output_buffer.setdefault(host_label, []).append(line)
+                else:
+                    print(line)
+
+        def on_algorithm(algo_type: str, algo_name: str, is_supported: bool) -> None:
+            if self.summary_only:
+                return
+            label = _algo_labels.get(algo_type, algo_type.capitalize())
+            nsa_info = (NSABackdoorDetector.SUSPECTED_NSA_ALGORITHMS.get(algo_type, {}).get(algo_name)
+                        if self.show_nsa_warnings else None)
+            is_weak = algo_name in SSHEnhancedScanner.WEAK_ALGORITHMS.get(algo_type, [])
+
+            # Classify for filtering
+            if not is_supported:
+                category = 'unsupported'
+            elif nsa_info:
+                category = 'nsa'
+            elif is_weak:
+                category = 'weak'
             else:
-                # Full algorithm scan
-                result.algorithms = self.scan_all_algorithms(host, port)
-                result.security_score = self.calculate_security_score(result.algorithms)
-                
-                # NSA backdoor analysis
-                result.nsa_backdoor_analysis = self.analyze_nsa_backdoor_risks(result.algorithms)
-                
-                # Check compliance if framework specified
-                if self.compliance_framework:
-                    result.compliance_status = ComplianceFramework.check_compliance(
-                        result.algorithms, self.compliance_framework
+                category = 'supported'
+
+            # Apply algo filter (empty = show all)
+            if self.filter_algo:
+                show = (
+                    ('supported' in self.filter_algo and category == 'supported') or
+                    ('unsupported' in self.filter_algo and category == 'unsupported') or
+                    ('flagged' in self.filter_algo and category in ('nsa', 'weak')) or
+                    ('weak' in self.filter_algo and category == 'weak') or
+                    ('nsa' in self.filter_algo and category == 'nsa')
+                )
+                if not show:
+                    return
+
+            # Build line
+            if not is_supported:
+                line = f"[-] Host: {host_label}  {label}: {algo_name}"
+            elif nsa_info:
+                risk = nsa_info.get('risk', '').upper()
+                if risk in ('HIGH', 'CRITICAL'):
+                    line = f"[!] Host: {host_label}  {label}: {algo_name}  (NSA high risk)"
+                elif risk == 'MEDIUM':
+                    line = f"[!] Host: {host_label}  {label}: {algo_name}  (NSA medium risk)"
+                else:
+                    line = f"[x] Host: {host_label}  {label}: {algo_name}"
+            elif is_weak:
+                line = f"[!] Host: {host_label}  {label}: {algo_name}  (weak)"
+            else:
+                line = f"[x] Host: {host_label}  {label}: {algo_name}"
+
+            _emit(line)
+
+        logger.debug(f"Starting scan of {host}:{port}")
+
+        try:
+            result.ssh_banner = self.scan_ssh_banner(host, port) or ""
+
+            if not result.ssh_banner:
+                result.status = "failed"
+                result.error_type = "connection"
+                result.error_message = "Unable to connect to SSH service"
+                logger.debug(f"No SSH banner received from {host}:{port}")
+            else:
+                if not self.summary_only:
+                    _emit(f"[x] Host: {host_label}  Banner: {result.ssh_banner}")
+
+                if explicit_algorithms:
+                    explicit_results = self.test_explicit_algorithms(host, port, explicit_algorithms)
+                    for algo, (algo_type, supported) in explicit_results.items():
+                        if algo_type not in result.algorithms:
+                            result.algorithms[algo_type] = []
+                        result.algorithms[algo_type].append(
+                            SSHAlgorithmInfo(name=algo, type=algo_type, supported=supported)
+                        )
+                        on_algorithm(algo_type, algo, supported)
+                    total_tested = len(explicit_results)
+                    supported_count = sum(1 for _, s in explicit_results.values() if s)
+                    result.security_score = (supported_count * 100 // total_tested) if total_tested > 0 else 0
+                else:
+                    if self.max_workers > 1:
+                        result.algorithms = self.scan_all_algorithms_parallel(host, port, line_callback=on_algorithm)
+                    else:
+                        result.algorithms = self.scan_all_algorithms(host, port, line_callback=on_algorithm)
+
+                    result.security_score = self.calculate_security_score(result.algorithms)
+
+                    result.nsa_backdoor_analysis = NSABackdoorDetector.check_nsa_backdoor_risk(
+                        result.algorithms, check_enabled=True
                     )
-            
-            result.status = "success"
-            
+
+                    if self.compliance_framework:
+                        result.compliance_status = ComplianceFramework.check_compliance(
+                            result.algorithms, self.compliance_framework,
+                            security_score=result.security_score
+                        )
+
+                result.status = "success"
+                logger.debug(f"Successfully scanned {host}:{port} - Score: {result.security_score}")
+
+        except ValidationError as e:
+            result.status = "failed"
+            result.error_type = "validation"
+            result.error_message = str(e)
+            logger.error(f"Validation error for {host}:{port}: {e}")
+        except SSHConnectionError as e:
+            result.status = "failed"
+            result.error_type = "connection"
+            result.error_message = str(e)
+            logger.error(f"Connection error for {host}:{port}: {e}")
         except Exception as e:
             result.status = "failed"
+            result.error_type = "unknown"
             result.error_message = str(e)
-            logger.error(f"Scan failed for {host}:{port}: {e}")
-        
+            logger.error(f"Unexpected error scanning {host}:{port}: {e}", exc_info=True)
+
         result.scan_time = time.time() - start_time
+
+        if not self.summary_only:
+            if result.status == 'success':
+                _emit(f"[x] Host: {host_label}  Security Score: {result.security_score}/100")
+                if result.compliance_status and 'overall_compliant' in result.compliance_status:
+                    fw = self.compliance_framework or 'N/A'
+                    status_str = "PASS" if result.compliance_status['overall_compliant'] else "FAIL"
+                    _emit(f"[x] Host: {host_label}  Compliance {fw}: {status_str}")
+            else:
+                err = f" ({result.error_type})" if result.error_type else ""
+                _emit(f"[x] Host: {host_label}  Status: failed{err}")
+                if result.error_message:
+                    _emit(f"[x] Host: {host_label}  Error: {result.error_message}")
+            _emit(f"[x] Host: {host_label}  Scanned in: {result.scan_time:.1f}s")
+
+            # If host-level filtering is active: flush buffer for matching hosts, discard the rest
+            if use_buffer:
+                lines = self._output_buffer.pop(host_label, [])
+                if self._host_passes_filter(result):
+                    with self.lock:
+                        for line in lines:
+                            print(line)
+
+        logger.debug(f"Scan of {host}:{port} completed in {result.scan_time:.2f}s")
         return result
     
-    def test_explicit_algorithms(self, host: str, port: int, algorithms: List[str]) -> Dict[str, bool]:
-        """Test explicit algorithms with enhanced error handling"""
+    def test_explicit_algorithms(self, host: str, port: int, algorithms: List[str]) -> Dict[str, Tuple[str, bool]]:
+        """Test explicit algorithms. Returns {algo_name: (algo_type, supported)}."""
         results = {}
         local_algorithms = self.get_local_ssh_algorithms()
-        
+
+        logger.debug(f"Testing {len(algorithms)} explicit algorithms on {host}:{port}")
+
         algo_type_map = {}
         for algo_type, algo_list in local_algorithms.items():
             for algo in algo_list:
                 algo_type_map[algo] = algo_type
-        
+
         for algorithm in algorithms:
+            algorithm = algorithm.strip()
             if algorithm in algo_type_map:
                 algo_type = algo_type_map[algorithm]
-                results[algorithm] = self.test_algorithm_connection(host, algorithm, algo_type, port)
+                supported = self.test_algorithm_connection(host, algorithm, algo_type, port)
+                results[algorithm] = (algo_type, supported)
             else:
-                # Try all types
-                results[algorithm] = False
+                # Unknown algorithm — try all types
+                found_type = None
                 for algo_type in ['cipher', 'mac', 'kex', 'key']:
                     if self.test_algorithm_connection(host, algorithm, algo_type, port):
-                        results[algorithm] = True
+                        found_type = algo_type
                         break
-        
+                results[algorithm] = (found_type or 'unknown', found_type is not None)
+
         return results
     
-    def scan_all_algorithms(self, host: str, port: int) -> Dict[str, List[SSHAlgorithmInfo]]:
-        """Scan all algorithms with enhanced performance"""
+    def scan_all_algorithms(self, host: str, port: int, line_callback=None) -> Dict[str, List[SSHAlgorithmInfo]]:
+        """Scan all algorithms sequentially, calling line_callback immediately for each supported one"""
         local_algorithms = self.get_local_ssh_algorithms()
         results = {}
-        
+
+        logger.debug(f"Scanning all algorithms for {host}:{port}")
+
         algo_type_map = {
             'cipher': 'encryption',
             'mac': 'mac',
-            'kex': 'key_exchange', 
+            'kex': 'key_exchange',
             'key': 'host_key'
         }
-        
+
         for algo_type, algo_list in local_algorithms.items():
             if not algo_list:
                 continue
-                
             supported_algorithms = []
-            
             for algorithm in algo_list:
                 is_supported = self.test_algorithm_connection(host, algorithm, algo_type, port)
-                
-                algo_info = SSHAlgorithmInfo(
+                supported_algorithms.append(SSHAlgorithmInfo(
                     name=algorithm,
                     type=algo_type_map.get(algo_type, algo_type),
                     supported=is_supported
-                )
-                supported_algorithms.append(algo_info)
-            
+                ))
+                if line_callback:
+                    line_callback(algo_type, algorithm, is_supported)
             results[algo_type] = supported_algorithms
-        
+
         return results
+
+    def scan_all_algorithms_parallel(self, host: str, port: int, line_callback=None) -> Dict[str, List[SSHAlgorithmInfo]]:
+        """Scan all algorithms in parallel, calling line_callback as each supported one is confirmed"""
+        local_algorithms = self.get_local_ssh_algorithms()
+
+        logger.debug(f"Scanning all algorithms for {host}:{port} in parallel")
+
+        tester = AlgorithmTester(
+            test_function=self.test_algorithm_connection,
+            max_workers=min(3, self.max_workers)
+        )
+
+        return tester.test_algorithms_parallel(host, port, local_algorithms, line_callback=line_callback)
     
     def calculate_security_score(self, algorithms: Dict[str, List[SSHAlgorithmInfo]]) -> int:
         """Calculate security score based on supported algorithms including NSA backdoor risks"""
-        weak_algorithms = {
-            'cipher': [
-                'des', '3des-cbc', 'blowfish-cbc', 'cast128-cbc', 'arcfour', 'arcfour128', 'arcfour256',
-                'aes128-cbc', 'aes192-cbc', 'aes256-cbc'
-            ],
-            'mac': [
-                'hmac-md5', 'hmac-md5-96', 'hmac-sha1-96', 'umac-64'
-            ],
-            'kex': [
-                'diffie-hellman-group1-sha1', 'diffie-hellman-group14-sha1', 
-                'diffie-hellman-group-exchange-sha1'
-            ],
-            'key': [
-                'ssh-dss', 'ssh-rsa'
-            ]
-        }
-        
-        # NSA-suspicious algorithms (higher penalty)
-        nsa_suspicious = {
-            'kex': ['ecdh-sha2-nistp256', 'ecdh-sha2-nistp384', 'ecdh-sha2-nistp521'],
-            'key': ['ecdsa-sha2-nistp256', 'ecdsa-sha2-nistp384', 'ecdsa-sha2-nistp521']
-        }
-        
         total_supported = 0
         weak_count = 0
         nsa_risk_count = 0
-        
+
         for algo_type, algo_list in algorithms.items():
             for algo in algo_list:
                 if algo.supported:
                     total_supported += 1
-                    
+
                     # Check for traditional weak algorithms
-                    if algo.name in weak_algorithms.get(algo_type, []):
+                    if algo.name in self.WEAK_ALGORITHMS.get(algo_type, []):
                         weak_count += 1
-                    
+
                     # Check for NSA-suspicious algorithms (double penalty)
-                    if algo.name in nsa_suspicious.get(algo_type, []):
+                    if algo.name in NSABackdoorDetector.SUSPECTED_NSA_ALGORITHMS.get(algo_type, {}):
                         nsa_risk_count += 1
         
         if total_supported == 0:
@@ -1021,143 +1682,107 @@ class SSHEnhancedScanner:
         nsa_penalty = (nsa_risk_count * 150 // total_supported)  # 1.5x penalty for NSA risk
         
         final_score = max(0, 100 - weak_penalty - nsa_penalty)
+        logger.debug(f"Security score calculated: {final_score} (weak_penalty={weak_penalty}, nsa_penalty={nsa_penalty})")
         return final_score
     
-    def analyze_nsa_backdoor_risks(self, algorithms: Dict[str, List[SSHAlgorithmInfo]]) -> Dict:
-        """Analyze NSA backdoor risks in supported algorithms"""
-        return NSABackdoorDetector.check_nsa_backdoor_risk(algorithms)
-    
-    def batch_scan(self, hosts: List[Tuple[str, int]], explicit_algorithms: List[str] = None) -> List[SSHHostResult]:
-        """Enhanced batch scanning with all features"""
-        results = []
+    def batch_scan(self, hosts: List[Tuple[str, int]], explicit_algorithms: List[str] = None, 
+                   resume_state: Tuple[List, List] = None) -> List[SSHHostResult]:
+        """Enhanced batch scanning with improved error handling and debugging"""
+        logger.debug(f"Starting batch_scan with {len(hosts) if hosts else 0} hosts")
+        
+        if resume_state:
+            pending_hosts, completed_results = resume_state
+            logger.info(f"Resuming scan with {len(pending_hosts)} pending hosts and {len(completed_results)} completed")
+        else:
+            pending_hosts = hosts.copy()
+            completed_results = []
+        
+        # Track completion for resume functionality
+        completed_hosts = {(r.host, r.port) for r in completed_results}
+        pending_list = [h for h in pending_hosts if h not in completed_hosts]
+        
+        logger.debug(f"Total hosts to process: {len(pending_list)}")
+        logger.debug(f"Max workers: {self.max_workers}")
+        
+        if not pending_list:
+            logger.warning("No pending hosts to scan")
+            return completed_results
         
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_host = {
-                executor.submit(self.scan_single_host, host, port, explicit_algorithms): (host, port)
-                for host, port in hosts
-            }
+            # Submit all tasks at once
+            future_to_host = {}
             
-            for future in as_completed(future_to_host):
-                host, port = future_to_host[future]
-                try:
-                    result = future.result()
-                    results.append(result)
+            _submit_interval = (1.0 / self.rate_limit) if self.rate_limit else 0.0
+            for i, (host, port) in enumerate(pending_list):
+                if _submit_interval and i > 0:
+                    time.sleep(_submit_interval)
+                logger.debug(f"Submitting scan task {i+1}/{len(pending_list)}: {host}:{port}")
+                future = executor.submit(self.scan_single_host, host, port, explicit_algorithms)
+                future_to_host[future] = (host, port)
+            
+            logger.debug(f"Submitted {len(future_to_host)} scan tasks")
+            
+            # Process completed futures
+            try:
+                for future in as_completed(future_to_host):
+                    host, port = future_to_host[future]
+                    logger.debug(f"Processing completed future for {host}:{port}")
                     
-                    with self.lock:
-                        status_icon = "✓" if result.status == "success" else "✗"
-                        compliance_info = ""
-                        if result.compliance_status and 'overall_compliant' in result.compliance_status:
-                            compliance = "✓" if result.compliance_status['overall_compliant'] else "✗"
-                            compliance_info = f" - Compliance: {compliance}"
-                        
-                        print(f"{status_icon} {host}:{port} - Score: {result.security_score}/100{compliance_info}")
-                        
-                        # Show NSA risk warning if enabled
-                        if result.nsa_backdoor_analysis:
-                            high_risk_count = len(result.nsa_backdoor_analysis.get('high_risk_algorithms', []))
-                            if high_risk_count > 0:
-                                print(f"    ⚠️  NSA BACKDOOR RISK: {high_risk_count} high-risk algorithms detected")
-                        
-                        print(f"    Time: {result.scan_time:.1f}s")
-                        
-                except Exception as e:
-                    with self.lock:
-                        print(f"✗ {host}:{port} - Error: {e}")
-        
-        return sorted(results, key=lambda x: (x.host, x.port))
-    
-    def format_results_table(self, results: List[SSHHostResult], show_algorithms: bool = True) -> str:
-        """Enhanced table formatting with compliance info and NSA backdoor warnings"""
-        if not results:
-            return "No results to display"
-        
-        table_data = []
-        headers = ["Host", "Port", "Status", "Security", "Compliance", "NSA Risk", "Banner", "Time(s)"]
-        
-        if show_algorithms:
-            headers.append("Algorithms")
-        
-        for result in results:
-            supported_algos = []
-            if result.algorithms:
-                for algo_type, algo_list in result.algorithms.items():
-                    for algo in algo_list:
-                        if algo.supported:
-                            supported_algos.append(algo.name)
+                    try:
+                        result = future.result()
+                        completed_results.append(result)
+                        completed_hosts.add((host, port))
+                        if self.spinner:
+                            self.spinner.update(len(completed_results))
+                        logger.debug(f"Processed {host}:{port} - Status: {result.status}, Score: {result.security_score}")
+
+                    except Exception as e:
+                        logger.error(f"Error processing result for {host}:{port}: {e}", exc_info=True)
+                        error_result = SSHHostResult(
+                            host=host, port=port, status="error",
+                            error_message=str(e), error_type="processing"
+                        )
+                        completed_results.append(error_result)
+                        show = (not self.summary_only and
+                                (not self.filter_hosts or 'error' in self.filter_hosts))
+                        if show:
+                            with self.lock:
+                                print(f"[x] Host: {host}:{port}  Status: error (processing)")
+                                print(f"[x] Host: {host}:{port}  Error: {e}")
             
-            # Compliance status
-            compliance_status = "N/A"
-            if result.compliance_status and 'overall_compliant' in result.compliance_status:
-                compliance_status = "✓ PASS" if result.compliance_status['overall_compliant'] else "✗ FAIL"
-            
-            # NSA backdoor risk status
-            nsa_risk_status = "N/A"
-            if result.nsa_backdoor_analysis:
-                high_risk_count = len(result.nsa_backdoor_analysis.get('high_risk_algorithms', []))
-                if high_risk_count > 0:
-                    nsa_risk_status = f"⚠️  {high_risk_count} HIGH"
-                else:
-                    medium_risk_count = len(result.nsa_backdoor_analysis.get('medium_risk_algorithms', []))
-                    if medium_risk_count > 0:
-                        nsa_risk_status = f"⚠️  {medium_risk_count} MED"
-                    else:
-                        nsa_risk_status = "✓ LOW"
-            
-            row = [
-                result.host,
-                str(result.port),
-                result.status,
-                f"{result.security_score}/100",
-                compliance_status,
-                nsa_risk_status,
-                result.ssh_banner[:20] + "..." if len(result.ssh_banner) > 20 else result.ssh_banner,
-                f"{result.scan_time:.1f}"
-            ]
-            
-            if show_algorithms:
-                algo_summary = ", ".join(supported_algos[:2])
-                if len(supported_algos) > 2:
-                    algo_summary += f" (+{len(supported_algos)-2} more)"
-                row.append(algo_summary)
-            
-            table_data.append(row)
+            except Exception as e:
+                logger.error(f"Error in batch scan executor loop: {e}", exc_info=True)
+                # Ensure we don't lose progress
+                for future, (host, port) in future_to_host.items():
+                    if not future.done():
+                        logger.warning(f"Cancelling incomplete future for {host}:{port}")
+                        future.cancel()
         
-        # Calculate column widths
-        col_widths = [len(header) for header in headers]
-        for row in table_data:
-            for i, cell in enumerate(row):
-                col_widths[i] = max(col_widths[i], len(str(cell)))
-        
-        # Build table
-        separator = "+" + "+".join("-" * (width + 2) for width in col_widths) + "+"
-        header_row = "|" + "|".join(f" {header:<{col_widths[i]}} " for i, header in enumerate(headers)) + "|"
-        
-        table_lines = [separator, header_row, separator]
-        
-        for row in table_data:
-            row_line = "|" + "|".join(f" {str(cell):<{col_widths[i]}} " for i, cell in enumerate(row)) + "|"
-            table_lines.append(row_line)
-        
-        table_lines.append(separator)
-        
-        return "\n".join(table_lines)
+        logger.info(f"Batch scan completed: {len(completed_results)} total results")
+        return sorted(completed_results, key=lambda x: (x.host, x.port))
     
     def export_results(self, results: List[SSHHostResult], format_type: str = 'json') -> str:
-        """Enhanced export with compliance data"""
+        """Enhanced export with compliance data and proper formatting"""
         if format_type.lower() == 'json':
             json_data = []
             for result in results:
-                result_dict = asdict(result)
+                # Convert to dict and ensure proper serialization
+                result_dict = result.to_dict()
                 json_data.append(result_dict)
-            return json.dumps(json_data, indent=2)
+            return json.dumps(json_data, indent=2, default=str)
         
         elif format_type.lower() == 'csv':
-            import io
             output = io.StringIO()
             writer = csv.writer(output)
             
-            writer.writerow(['Host', 'Port', 'Status', 'Security_Score', 'Compliance_Status', 'NSA_Risk_Level',
-                           'NSA_High_Risk_Count', 'SSH_Banner', 'Scan_Time', 'Supported_Algorithms'])
+            # Write headers
+            headers = ['Host', 'Port', 'Status', 'Security_Score', 'Compliance_Status']
+            
+            if self.show_nsa_warnings:
+                headers.extend(['NSA_Risk_Level', 'NSA_High_Risk_Count'])
+            
+            headers.extend(['SSH_Banner', 'Scan_Time', 'Error_Type', 'Error_Message', 'Supported_Algorithms'])
+            writer.writerow(headers)
             
             for result in results:
                 supported_algos = []
@@ -1171,252 +1796,123 @@ class SSHEnhancedScanner:
                 if result.compliance_status and 'overall_compliant' in result.compliance_status:
                     compliance_status = "PASS" if result.compliance_status['overall_compliant'] else "FAIL"
                 
-                # NSA risk information
-                nsa_risk_level = "UNKNOWN"
-                nsa_high_risk_count = 0
-                if result.nsa_backdoor_analysis:
-                    high_risk_algorithms = result.nsa_backdoor_analysis.get('high_risk_algorithms', [])
-                    nsa_high_risk_count = len(high_risk_algorithms)
-                    
-                    if nsa_high_risk_count > 0:
-                        nsa_risk_level = "HIGH"
-                    elif len(result.nsa_backdoor_analysis.get('medium_risk_algorithms', [])) > 0:
-                        nsa_risk_level = "MEDIUM"
-                    else:
-                        nsa_risk_level = "LOW"
-                
-                writer.writerow([
+                row = [
                     result.host,
                     result.port,
                     result.status,
                     result.security_score,
-                    compliance_status,
-                    nsa_risk_level,
-                    nsa_high_risk_count,
+                    compliance_status
+                ]
+                
+                # NSA risk information
+                if self.show_nsa_warnings:
+                    nsa_risk_level = "UNKNOWN"
+                    nsa_high_risk_count = 0
+                    if result.nsa_backdoor_analysis and 'enabled' in result.nsa_backdoor_analysis:
+                        if result.nsa_backdoor_analysis['enabled']:
+                            high_risk_algorithms = result.nsa_backdoor_analysis.get('high_risk_algorithms', [])
+                            nsa_high_risk_count = len(high_risk_algorithms)
+                            
+                            if nsa_high_risk_count > 0:
+                                nsa_risk_level = "HIGH"
+                            elif len(result.nsa_backdoor_analysis.get('medium_risk_algorithms', [])) > 0:
+                                nsa_risk_level = "MEDIUM"
+                            else:
+                                nsa_risk_level = "LOW"
+                    row.extend([nsa_risk_level, nsa_high_risk_count])
+                
+                row.extend([
                     result.ssh_banner,
                     f"{result.scan_time:.2f}",
+                    result.error_type or "",
+                    result.error_message or "",
                     "; ".join(supported_algos)
                 ])
+                
+                writer.writerow(row)
             
             return output.getvalue()
         
         elif format_type.lower() == 'yaml':
             yaml_data = []
             for result in results:
-                result_dict = asdict(result)
+                result_dict = result.to_dict()
                 yaml_data.append(result_dict)
-            return yaml.dump(yaml_data, default_flow_style=False)
-        
-        else:
-            return self.format_results_table(results)
+            return yaml.dump(yaml_data, default_flow_style=False, sort_keys=False)
+
+        return ""
     
-    def get_performance_stats(self) -> Dict:
-        """Get performance statistics"""
-        stats = {
-            'dns_cache': self.dns_cache.get_stats(),
-            'multiplexing_enabled': self.use_multiplexing,
-            'max_workers': self.max_workers,
-            'retry_attempts': self.retry_attempts
-        }
-        
-        if self.multiplexer:
-            stats['active_ssh_connections'] = len(self.multiplexer.active_connections)
-        
-        return stats
 
 
 def load_config_file(config_path: str) -> Dict:
-    """Load configuration from TOML file"""
+    """Load configuration from TOML file with validation"""
     try:
         config_file = Path(config_path)
         if config_file.exists():
-            return toml.load(config_file)
+            logger.info(f"Loading configuration from {config_path}")
+            config = toml.load(config_file)
+            # Validate configuration
+            return ConfigValidator.validate_config(config)
         else:
             logger.warning(f"Config file not found: {config_path}")
             return {}
+    except toml.TomlDecodeError as e:
+        logger.error(f"Invalid TOML syntax in {config_path}: {e}")
+        raise ConfigurationError(f"Invalid TOML configuration: {e}")
     except Exception as e:
         logger.error(f"Error loading config file {config_path}: {e}")
-        return {}
+        raise ConfigurationError(f"Failed to load configuration: {e}")
 
 
-def main():
-    """Enhanced main function with configuration support"""
-    parser = argparse.ArgumentParser(description='Enhanced SSH Algorithm Security Scanner')
+def print_summary_report(results: List[SSHHostResult], scanner: SSHEnhancedScanner, total_time: float):
+    """Print comprehensive summary report"""
+    successful_scans = sum(1 for r in results if r.status == "success")
+    failed_scans = len(results) - successful_scans
+    avg_score = sum(r.security_score for r in results if r.status == "success") / max(successful_scans, 1)
     
-    # Configuration
-    parser.add_argument('--config', '-c', help='TOML configuration file')
+    print(f"\n" + "=" * 80)
+    print("SUMMARY")
+    print("=" * 80)
+    print(f"Total hosts scanned: {len(results)}")
+    print(f"Successful scans: {successful_scans}")
+    print(f"Failed scans: {failed_scans}")
     
-    # Host specification options
-    host_group = parser.add_mutually_exclusive_group()
-    host_group.add_argument('--host', '-H', help='Single host or comma-separated list (host1:port,host2:port)')
-    host_group.add_argument('--file', '-f', help='File containing hosts (supports .json, .yaml, .csv, .txt)')
-    host_group.add_argument('--local', '-l', action='store_true', help='Show local SSH client algorithms')
-    
-    # Scanning options
-    parser.add_argument('--port', '-p', type=int, default=22, help='Default SSH port (default: 22)')
-    parser.add_argument('--explicit', '-e', help='Comma-separated list of specific algorithms to test')
-    parser.add_argument('--threads', '-T', type=int, default=20, help='Number of concurrent threads (default: 20)')
-    parser.add_argument('--timeout', '-t', type=int, default=10, help='Connection timeout (default: 10)')
-    parser.add_argument('--no-multiplex', action='store_true', help='Disable SSH multiplexing')
-    parser.add_argument('--retry-attempts', '-r', type=int, default=3, help='Retry attempts for failed connections (default: 3)')
-    
-    # Compliance options
-    parser.add_argument('--compliance', choices=ComplianceFramework.get_framework_list(), 
-                       help='Compliance framework to check against')
-    parser.add_argument('--list-frameworks', action='store_true', help='List available compliance frameworks')
-    parser.add_argument('--nsa-analysis', action='store_true', help='Enable detailed NSA backdoor risk analysis')
-    
-    # Output options
-    parser.add_argument('--format', choices=['json', 'csv', 'yaml', 'table'], default='table',
-                       help='Output format (default: table)')
-    parser.add_argument('--output', '-o', help='Output file (default: stdout)')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
-    parser.add_argument('--stats', action='store_true', help='Show performance statistics')
-    
-    args = parser.parse_args()
-    
-    # Load configuration
-    config = {}
-    if args.config:
-        config = load_config_file(args.config)
-    
-    # Override config with command line arguments
-    if args.threads:
-        config['threads'] = args.threads
-    if args.timeout:
-        config['timeout'] = args.timeout
-    if args.no_multiplex:
-        config['use_multiplexing'] = False
-    if args.retry_attempts:
-        config['retry_attempts'] = args.retry_attempts
-    if args.compliance:
-        config['compliance_framework'] = args.compliance
-    
-    # Set logging level
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-    
-    # List frameworks and exit
-    if args.list_frameworks:
-        print("Available Compliance Frameworks:")
-        for fw_name in ComplianceFramework.get_framework_list():
-            fw_info = ComplianceFramework.get_framework_info(fw_name)
-            print(f"  {fw_name}: {fw_info.get('name', 'Unknown')}")
-        return 0
-    
-    # Show local algorithms
-    if args.local:
-        print("Local SSH client supported algorithms:")
-        with SSHEnhancedScanner(config) as scanner:
-            local_algorithms = scanner.get_local_ssh_algorithms()
-            
-            for algo_type, algo_list in local_algorithms.items():
-                print(f"\n{algo_type.upper()} ({len(algo_list)}):")
-                for algo in algo_list:
-                    print(f"  - {algo}")
-        return 0
-    
-    # Parse explicit algorithms
-    explicit_algorithms = None
-    if args.explicit:
-        explicit_algorithms = [algo.strip() for algo in args.explicit.split(',')]
-        print(f"Testing explicit algorithms: {explicit_algorithms}")
-    
-    # Parse hosts
-    hosts = []
-    
-    with SSHEnhancedScanner(config) as scanner:
-        if args.file:
-            try:
-                hosts = scanner.load_hosts_from_file(args.file)
-                print(f"Loaded {len(hosts)} hosts from {args.file}")
-            except Exception as e:
-                print(f"Error loading file: {e}", file=sys.stderr)
-                return 1
+    if failed_scans > 0:
+        # Break down failures by type
+        error_types = {}
+        for r in results:
+            if r.status != "success" and r.error_type:
+                error_types[r.error_type] = error_types.get(r.error_type, 0) + 1
         
-        elif args.host:
-            host_strings = [h.strip() for h in args.host.split(',')]
-            for host_string in host_strings:
-                host, port = scanner.parse_host_string(host_string)
-                hosts.append((host, port if port != 22 else args.port))
-        
-        else:
-            parser.print_help()
-            return 1
-        
-        if not hosts:
-            print("No hosts to scan", file=sys.stderr)
-            return 1
-        
-        # Show configuration info
-        print(f"\nConfiguration:")
-        print(f"  Threads: {scanner.max_workers}")
-        print(f"  Timeout: {scanner.timeout}s")
-        print(f"  SSH Multiplexing: {'enabled' if scanner.use_multiplexing else 'disabled'}")
-        print(f"  DNS Caching: enabled (TTL: {scanner.dns_cache_ttl}s)")
-        print(f"  Retry Attempts: {scanner.retry_attempts}")
-        if scanner.compliance_framework:
-            fw_info = ComplianceFramework.get_framework_info(scanner.compliance_framework)
-            print(f"  Compliance Framework: {scanner.compliance_framework} ({fw_info.get('name', 'Unknown')})")
-        
-        # Perform scanning
-        print(f"\nStarting scan of {len(hosts)} hosts...")
-        print("=" * 80)
-        
-        results = scanner.batch_scan(hosts, explicit_algorithms)
-        
-        # Generate output
-        if args.format == 'table':
-            output = scanner.format_results_table(results, show_algorithms=not explicit_algorithms)
-        else:
-            output = scanner.export_results(results, args.format)
-        
-        # Write output
-        if args.output:
-            with open(args.output, 'w', encoding='utf-8') as f:
-                f.write(output)
-            print(f"\nResults written to {args.output}")
-        else:
-            print("\n" + "=" * 80)
-            print("SCAN RESULTS")
-            print("=" * 80)
-            print(output)
-        
-        # Summary statistics
-        successful_scans = sum(1 for r in results if r.status == "success")
-        failed_scans = len(results) - successful_scans
-        avg_score = sum(r.security_score for r in results if r.status == "success") / max(successful_scans, 1)
-        total_time = sum(r.scan_time for r in results)
-        
+        print("\nFailure breakdown:")
+        for error_type, count in sorted(error_types.items()):
+            print(f"  {error_type}: {count}")
+    
+    print(f"\nAverage security score: {avg_score:.1f}/100")
+    print(f"Total scan time: {total_time:.1f}s")
+    print(f"Average time per host: {total_time/len(results):.1f}s")
+    
+    # Compliance summary
+    if scanner.compliance_framework and successful_scans > 0:
+        compliant_hosts = sum(1 for r in results 
+                            if r.compliance_status and r.compliance_status.get('overall_compliant', False))
+        compliance_rate = (compliant_hosts / successful_scans) * 100
+        print(f"\nCompliance ({scanner.compliance_framework}):")
+        print(f"  Compliant hosts: {compliant_hosts}/{successful_scans} ({compliance_rate:.1f}%)")
+    
+    # NSA backdoor analysis summary
+    if scanner.show_nsa_warnings and any(r.nsa_backdoor_analysis for r in results):
         print(f"\n" + "=" * 80)
-        print("SUMMARY")
+        print("NSA BACKDOOR RISK ANALYSIS")
         print("=" * 80)
-        print(f"Total hosts scanned: {len(results)}")
-        print(f"Successful scans: {successful_scans}")
-        print(f"Failed scans: {failed_scans}")
-        print(f"Average security score: {avg_score:.1f}/100")
-        print(f"Total scan time: {total_time:.1f}s")
-        print(f"Average time per host: {total_time/len(results):.1f}s")
         
-        # Compliance summary
-        if scanner.compliance_framework and successful_scans > 0:
-            compliant_hosts = sum(1 for r in results 
-                                if r.compliance_status and r.compliance_status.get('overall_compliant', False))
-            compliance_rate = (compliant_hosts / successful_scans) * 100
-            print(f"Compliance rate ({scanner.compliance_framework}): {compliant_hosts}/{successful_scans} ({compliance_rate:.1f}%)")
+        total_high_risk = 0
+        total_medium_risk = 0
+        affected_hosts = 0
         
-        # NSA backdoor analysis summary
-        if args.nsa_analysis or any(r.nsa_backdoor_analysis for r in results):
-            print(f"\n" + "=" * 80)
-            print("NSA BACKDOOR RISK ANALYSIS")
-            print("=" * 80)
-            
-            total_high_risk = 0
-            total_medium_risk = 0
-            affected_hosts = 0
-            
-            for result in results:
-                if result.nsa_backdoor_analysis:
+        for result in results:
+            if result.nsa_backdoor_analysis and 'enabled' in result.nsa_backdoor_analysis:
+                if result.nsa_backdoor_analysis['enabled']:
                     high_risk_count = len(result.nsa_backdoor_analysis.get('high_risk_algorithms', []))
                     medium_risk_count = len(result.nsa_backdoor_analysis.get('medium_risk_algorithms', []))
                     
@@ -1424,41 +1920,395 @@ def main():
                         affected_hosts += 1
                         total_high_risk += high_risk_count
                         total_medium_risk += medium_risk_count
-            
-            print(f"Hosts with NSA backdoor risks: {affected_hosts}/{successful_scans}")
-            print(f"High-risk algorithms detected: {total_high_risk}")
-            print(f"Medium-risk algorithms detected: {total_medium_risk}")
-            
-            # Show detailed analysis for first host with high risks
-            for result in results:
-                if (result.nsa_backdoor_analysis and 
-                    result.nsa_backdoor_analysis.get('high_risk_algorithms')):
-                    
-                    print(f"\n⚠️  HIGH RISK ALGORITHMS DETECTED:")
-                    for risk_algo in result.nsa_backdoor_analysis['high_risk_algorithms']:
-                        print(f"  - {risk_algo['algorithm']} ({risk_algo['type']}): {risk_algo['reason']}")
-                        print(f"    Recommended: {risk_algo['recommended_alternative']}")
-                    
-                    if result.nsa_backdoor_analysis.get('recommendations'):
-                        print(f"\n📋 SECURITY RECOMMENDATIONS:")
-                        for i, rec in enumerate(result.nsa_backdoor_analysis['recommendations'][:3], 1):
-                            print(f"  {i}. {rec}")
-                    break
         
-        # Performance statistics
-        if args.stats:
-            print(f"\n" + "=" * 80)
-            print("PERFORMANCE STATISTICS")
-            print("=" * 80)
-            perf_stats = scanner.get_performance_stats()
-            for key, value in perf_stats.items():
-                if isinstance(value, dict):
-                    print(f"{key}:")
-                    for subkey, subvalue in value.items():
-                        print(f"  {subkey}: {subvalue}")
+        print(f"Hosts with NSA backdoor risks: {affected_hosts}/{successful_scans}")
+        print(f"Total high-risk algorithms: {total_high_risk}")
+        print(f"Total medium-risk algorithms: {total_medium_risk}")
+        
+        # Show top risky algorithms
+        if total_high_risk > 0:
+            print(f"\nMost common HIGH RISK algorithms:")
+            risk_counter = {}
+            for result in results:
+                if result.nsa_backdoor_analysis and 'high_risk_algorithms' in result.nsa_backdoor_analysis:
+                    for risk_algo in result.nsa_backdoor_analysis['high_risk_algorithms']:
+                        algo_name = risk_algo['algorithm']
+                        risk_counter[algo_name] = risk_counter.get(algo_name, 0) + 1
+
+            for algo, count in sorted(risk_counter.items(), key=lambda x: x[1], reverse=True)[:5]:
+                print(f"  - {algo}: found on {count} hosts")
+
+    # Scanner configuration & DNS cache stats
+    print(f"\n" + "=" * 80)
+    print("SCANNER STATISTICS")
+    print("=" * 80)
+    print(f"Threads:          {scanner.max_workers}")
+    print(f"Timeout:          {scanner.timeout}s")
+    print(f"Retry attempts:   {scanner.retry_attempts}")
+    print(f"NSA warnings:     {'enabled' if scanner.show_nsa_warnings else 'disabled'}")
+
+    dns = scanner.dns_cache.get_stats()
+    print(f"\nDNS Cache:")
+    print(f"  Hit rate:       {dns['hit_rate']}")
+    print(f"  Lookups:        {dns['total_lookups']}  (hits: {dns['hits']}, misses: {dns['misses']})")
+
+
+class Spinner:
+    """Thread-based spinner for --summary-only mode. Writes to stderr."""
+
+    CHARS = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+
+    def __init__(self, message: str = 'Scanning'):
+        self.message = message
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._done = 0
+        self._total = 0
+        self._lock = threading.Lock()
+
+    def start(self, total: int = 0):
+        self._total = total
+        self._done = 0
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+
+    def update(self, done: int):
+        with self._lock:
+            self._done = done
+
+    def _spin(self):
+        i = 0
+        t0 = time.time()
+        tty = sys.stderr.isatty()
+        while not self._stop.is_set():
+            elapsed = time.time() - t0
+            char = self.CHARS[i % len(self.CHARS)]
+            with self._lock:
+                done, total = self._done, self._total
+            parts = [char, self.message]
+            if total:
+                parts.append(f'{done}/{total} hosts')
+            parts.append(f'{elapsed:.0f}s')
+            line = '\r' + '  '.join(parts) + '  '
+            if tty:
+                sys.stderr.write(line)
+                sys.stderr.flush()
+            time.sleep(0.1)
+            i += 1
+
+    def stop(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=0.5)
+        if sys.stderr.isatty():
+            sys.stderr.write('\r' + ' ' * 60 + '\r')
+            sys.stderr.flush()
+
+
+def main():
+    """Main function"""
+    parser = argparse.ArgumentParser(
+        description=f'SSH Algorithm Security Scanner v{__version__}',
+        formatter_class=lambda prog: argparse.RawDescriptionHelpFormatter(prog, max_help_position=36, width=120),
+        epilog="""
+Examples:
+  %(prog)s --host example.com
+  %(prog)s --host "server1.com:22,server2.com:2222,192.168.1.100"
+  %(prog)s --file hosts.txt --threads 50 --compliance NIST
+  %(prog)s --file hosts.txt --format json --output results.json
+  %(prog)s --host example.com --explicit "aes256-gcm@openssh.com,ssh-ed25519"
+"""
+    )
+
+    # Version
+    parser.add_argument('--version', '-V', action='version',
+                        version=f'%(prog)s {__version__}  by {__author__}')
+
+    # Configuration
+    parser.add_argument('--config', '-c', metavar='FILE',
+                        help='TOML configuration file path')
+
+    # Host specification (mutually exclusive)
+    host_group = parser.add_mutually_exclusive_group()
+    host_group.add_argument('--host', '-H', metavar='HOSTS',
+                            help='Single host or comma-separated list')
+    host_group.add_argument('--file', '-f', metavar='FILE',
+                            help='File containing hosts (.json, .yaml, .csv, .txt)')
+    host_group.add_argument('--local', '-l', action='store_true',
+                            help='Scan local SSH server (127.0.0.1)')
+
+    # Scanning options
+    parser.add_argument('--port', '-p', type=int, default=22,
+                        help='Default SSH port (default: 22)')
+    parser.add_argument('--threads', '-T', type=int, default=None,
+                        help='Number of concurrent threads (default: 20)')
+    parser.add_argument('--timeout', '-t', type=int, default=None,
+                        help='Connection timeout in seconds (default: 10)')
+    parser.add_argument('--retry-attempts', type=int, default=None,
+                        help='Retry attempts for failed connections (default: 3)')
+    parser.add_argument('--rate-limit', type=float, default=None, metavar='N',
+                        help='Max new SSH connections per second, e.g. 5.0 (default: unlimited)')
+    parser.add_argument('--timeout-banner', type=int, default=None, metavar='SEC',
+                        help='Timeout for SSH banner grab in seconds (default: min(timeout, 5))')
+    parser.add_argument('--strict-host-key-checking', default=None,
+                        choices=['yes', 'no', 'accept-new'],
+                        metavar='MODE',
+                        help='SSH StrictHostKeyChecking: yes, no, accept-new (default: accept-new)')
+
+    # Algorithm testing
+    parser.add_argument('--explicit', '-e', metavar='ALGOS',
+                        help='Comma-separated list of specific algorithms to test')
+
+    # Compliance
+    parser.add_argument('--compliance', metavar='FRAMEWORK',
+                        choices=ComplianceFramework.get_framework_list(),
+                        help='Compliance framework: NIST, FIPS_140_2, BSI_TR_02102, ANSSI, PRIVACY_FOCUSED')
+    parser.add_argument('--list-frameworks', action='store_true',
+                        help='List available compliance frameworks')
+    parser.add_argument('--list-filter', action='store_true',
+                        help='List available --filter tokens')
+    parser.add_argument('--no-nsa-warnings', action='store_true',
+                        help='Suppress NSA risk annotations in live output and summary (analysis still runs; NSA data included in exports)')
+
+    # Output options
+    parser.add_argument('--format', choices=['json', 'csv', 'yaml'],
+                        default=None, help='Export format (json, csv, yaml); use with --output or alone')
+    parser.add_argument('--output', '-o', metavar='FILE',
+                        help='Write exported results to FILE')
+    parser.add_argument('--filter', metavar='TOKENS',
+                        help='Filter output. Algo: supported, unsupported, flagged, weak, nsa. '
+                             'Host: passed, failed, error. Comma-separated, e.g.: --filter supported,nsa')
+    parser.add_argument('--summary', action='store_true',
+                        help='Print summary report after scan')
+    parser.add_argument('--summary-only', action='store_true',
+                        help='Suppress live output, print only the summary report')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                        help='Verbose output')
+    parser.add_argument('--debug', action='store_true',
+                        help='Enable debug output')
+
+    args = parser.parse_args()
+
+    # Setup logging
+    logger = setup_logging(args.debug, args.verbose)
+
+    # --list-frameworks: no scanner needed
+    if args.list_frameworks:
+        print("Available compliance frameworks:")
+        for fw_name in ComplianceFramework.get_framework_list():
+            fw_info = ComplianceFramework.get_framework_info(fw_name)
+            name = fw_info.get('name', fw_name)
+            print(f"  {fw_name:<20} {name}")
+        return 0
+
+    # --list-filter: no scanner needed
+    if args.list_filter:
+        print("Available --filter tokens:\n")
+        print("  Algorithm filters (control which algorithm lines are shown):")
+        print(f"  {'supported':<16} Show supported algorithms with no flag  [x]")
+        print(f"  {'unsupported':<16} Show algorithms not supported by the server  [-]")
+        print(f"  {'flagged':<16} Show all flagged algorithms (weak + NSA)  [!]")
+        print(f"  {'weak':<16} Show only weak algorithms (subset of flagged)  [!]")
+        print(f"  {'nsa':<16} Show only NSA-suspicious algorithms (subset of flagged)  [!]")
+        print()
+        print("  Host filters (show only hosts matching the condition):")
+        print(f"  {'passed':<16} Hosts that passed the compliance check (requires --compliance)")
+        print(f"  {'failed':<16} Hosts that failed the compliance check (requires --compliance)")
+        print(f"  {'error':<16} Hosts where the scan failed (connection error, timeout, etc.)")
+        print()
+        print("  Tokens are comma-separated. Algo and host filters can be combined.")
+        print("  Examples:")
+        print("    --filter supported")
+        print("    --filter flagged")
+        print("    --filter nsa,failed")
+        print("    --filter supported,unsupported,failed")
+        return 0
+
+    # Load config file if specified
+    config = {}
+    if args.config:
+        config = load_config_file(args.config)
+        if not config:
+            print(f"Warning: Could not load config from {args.config}", file=sys.stderr)
+
+    # Apply CLI overrides (only when explicitly provided)
+    if 'scanner' not in config:
+        config['scanner'] = {}
+    if args.threads is not None:
+        config['scanner']['threads'] = args.threads
+    if args.timeout is not None:
+        config['scanner']['timeout'] = args.timeout
+    if args.retry_attempts is not None:
+        config['scanner']['retry_attempts'] = args.retry_attempts
+    if args.rate_limit is not None:
+        if args.rate_limit <= 0:
+            print("Error: --rate-limit must be a positive number", file=sys.stderr)
+            return 1
+        config['scanner']['rate_limit'] = args.rate_limit
+    if args.timeout_banner is not None:
+        if args.timeout_banner <= 0:
+            print("Error: --timeout-banner must be a positive number", file=sys.stderr)
+            return 1
+        config['scanner']['banner_timeout'] = args.timeout_banner
+    if args.strict_host_key_checking is not None:
+        config['scanner']['strict_host_key_checking'] = args.strict_host_key_checking
+
+    if args.compliance:
+        if 'compliance' not in config:
+            config['compliance'] = {}
+        config['compliance']['framework'] = args.compliance
+
+    # Explicit algorithms list
+    explicit_algorithms = None
+    if args.explicit:
+        explicit_algorithms = [a.strip() for a in args.explicit.split(',') if a.strip()]
+
+    # Accept hosts from stdin when piped (no --host/--file/--local given)
+    if not args.host and not args.file and not args.local:
+        if not sys.stdin.isatty():
+            stdin_data = sys.stdin.read().strip()
+            if stdin_data:
+                # Normalize any mix of commas, spaces, newlines into a comma-separated string
+                args.host = re.sub(r'[\s,]+', ',', stdin_data).strip(',')
+            else:
+                parser.print_help()
+                return 1
+        else:
+            parser.print_help()
+            return 1
+
+    scan_start = time.time()
+    results = []
+
+    try:
+        with SSHEnhancedScanner(config) as scanner:
+            scanner.show_nsa_warnings = not args.no_nsa_warnings
+            scanner.summary_only = args.summary_only
+
+            if args.summary_only:
+                scanner.spinner = Spinner('Scanning')
+
+            # Parse --filter tokens
+            _ALGO_TOKENS = {'supported', 'unsupported', 'flagged', 'weak', 'nsa'}
+            _HOST_TOKENS = {'passed', 'failed', 'error'}
+            if args.filter:
+                tokens = {t.strip().lower() for t in args.filter.split(',') if t.strip()}
+                unknown = tokens - _ALGO_TOKENS - _HOST_TOKENS
+                if unknown:
+                    print(f"Warning: unknown filter tokens: {', '.join(sorted(unknown))}", file=sys.stderr)
+                scanner.filter_algo = tokens & _ALGO_TOKENS
+                scanner.filter_hosts = tokens & _HOST_TOKENS
+
+            def _scan_header(host_count: int) -> None:
+                """Print a one-line scan summary before scanning starts."""
+                if scanner.summary_only:
+                    return
+                parts = [f"{scanner.max_workers} threads", f"{scanner.timeout}s timeout"]
+                if scanner.banner_timeout is not None:
+                    parts.append(f"banner-timeout {scanner.banner_timeout}s")
+                if scanner.rate_limit:
+                    parts.append(f"rate-limit {scanner.rate_limit}/s")
+                if scanner.compliance_framework:
+                    parts.append(f"{scanner.compliance_framework} compliance")
+                if explicit_algorithms:
+                    alg_str = ', '.join(explicit_algorithms[:3])
+                    if len(explicit_algorithms) > 3:
+                        alg_str += f' +{len(explicit_algorithms) - 3} more'
+                    parts.append(f"explicit: {alg_str}")
+                noun = 'host' if host_count == 1 else 'hosts'
+                print(f"Scanning {host_count} {noun}  {'  '.join(parts)}\n")
+
+            # --local: scan the local SSH server (127.0.0.1)
+            if args.local:
+                if not args.summary_only:
+                    print(f"Scanning local SSH server (127.0.0.1:{args.port}) ...\n")
+                if scanner.spinner:
+                    scanner.spinner.start(total=1)
+                result = scanner.scan_single_host('127.0.0.1', args.port)
+                if scanner.spinner:
+                    scanner.spinner.update(1)
+                results = [result]
+
+            if args.host:
+                hosts = []
+                for host_str in args.host.split(','):
+                    host_str = host_str.strip()
+                    if not host_str:
+                        continue
+                    try:
+                        host, port = scanner.parse_host_string(host_str)
+                        if ':' not in host_str and '[' not in host_str:
+                            port = args.port
+                        hosts.append((host, port))
+                    except ValidationError as e:
+                        print(f"Warning: Skipping invalid host '{host_str}': {e}", file=sys.stderr)
+
+                if not hosts:
+                    print("No valid hosts to scan.", file=sys.stderr)
+                    return 1
+
+                _scan_header(len(hosts))
+                if scanner.spinner:
+                    scanner.spinner.start(total=len(hosts))
+                results = scanner.batch_scan(hosts, explicit_algorithms=explicit_algorithms)
+
+            elif args.file:
+                hosts = scanner.load_hosts_from_file(args.file, default_port=args.port)
+
+                if not hosts:
+                    print("No hosts found in file.", file=sys.stderr)
+                    return 1
+
+                _scan_header(len(hosts))
+                if scanner.spinner:
+                    scanner.spinner.start(total=len(hosts))
+                results = scanner.batch_scan(hosts, explicit_algorithms=explicit_algorithms)
+
+            if scanner.spinner:
+                scanner.spinner.stop()
+
+            # Export results if --format or --output requested
+            if results and (args.format or args.output):
+                fmt = args.format or 'json'
+                output_content = scanner.export_results(results, fmt)
+                if args.output:
+                    with open(args.output, 'w') as out_f:
+                        out_f.write(output_content)
+                    print(f"Results written to {args.output}")
                 else:
-                    print(f"{key}: {value}")
-    
+                    print(output_content)
+
+            if args.summary or args.summary_only:
+                print_summary_report(results, scanner, time.time() - scan_start)
+
+    except KeyboardInterrupt:
+        print("\nScan interrupted by user.", file=sys.stderr)
+        return 130
+    except (ConfigurationError, ValidationError) as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        logger.error(f"Configuration error: {e}", exc_info=True)
+        return 1
+    except SSHScannerError as e:
+        print(f"Scanner error: {e}", file=sys.stderr)
+        logger.error(f"Scanner error: {e}", exc_info=True)
+        return 1
+    except Exception as e:
+        print(f"Unexpected error: {e}", file=sys.stderr)
+        logger.error(f"Unexpected error: {e}", exc_info=True)
+        return 1
+
+    if results:
+        has_compliance_failures = (
+            scanner.compliance_framework and
+            any(r.compliance_status and not r.compliance_status.get('overall_compliant', True)
+                for r in results if r.status == 'success')
+        )
+        has_scan_errors = any(r.status != 'success' for r in results)
+        if has_compliance_failures:
+            return 2
+        if has_scan_errors:
+            return 3
     return 0
 
 

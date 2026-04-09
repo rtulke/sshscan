@@ -16,11 +16,6 @@ threads = 30
 # Recommended: 10s for reliable networks, 20-30s for slow networks
 timeout = 15
 
-# Enable SSH connection multiplexing for better performance (true/false)
-# Reuses SSH connections for multiple algorithm tests (80-90% faster)
-# Disable only if experiencing connection issues with specific SSH servers
-use_multiplexing = true
-
 # Number of retry attempts for failed connections (1-10)
 # Exponential backoff is used between retries
 retry_attempts = 3
@@ -29,6 +24,23 @@ retry_attempts = 3
 # How long to cache DNS lookups to avoid redundant queries
 # Recommended: 300s (5 min) for most cases, 600s+ for large batch scans
 dns_cache_ttl = 600
+
+# Banner grab timeout in seconds (1-30)
+# How long to wait for the initial SSH banner before giving up
+# Default: min(timeout, 5) — override here or via --timeout-banner
+# banner_timeout = 3
+
+# Maximum new SSH connections per second (0.1-1000)
+# Throttles scan submission rate — useful for rate-limited or fragile targets
+# Default: unlimited — enable here or via --rate-limit
+# rate_limit = 10.0
+
+# SSH StrictHostKeyChecking mode: yes, no, accept-new
+# accept-new: auto-accept unknown hosts, reject changed keys (MITM protection)
+# no:         accept everything silently (useful when scanning many unknown hosts)
+# yes:        only connect to hosts already in known_hosts (not useful for scanning)
+# Note: UserKnownHostsFile is always /dev/null, so accept-new ≈ no in practice
+# strict_host_key_checking = "accept-new"
 
 # ====================================================================
 # COMPLIANCE CONFIGURATION
@@ -51,7 +63,6 @@ framework = "NIST"
 # [scanner]
 # threads = 50
 # timeout = 12
-# use_multiplexing = true
 # retry_attempts = 3
 # dns_cache_ttl = 600
 # 
@@ -62,7 +73,6 @@ framework = "NIST"
 # [scanner]
 # threads = 100
 # timeout = 5
-# use_multiplexing = true
 # retry_attempts = 2
 # dns_cache_ttl = 1200
 # 
@@ -73,7 +83,6 @@ framework = "NIST"
 # [scanner]
 # threads = 10
 # timeout = 30
-# use_multiplexing = false
 # retry_attempts = 5
 # dns_cache_ttl = 300
 # 

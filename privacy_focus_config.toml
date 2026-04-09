@@ -9,14 +9,20 @@ threads = 30
 # Slightly longer timeout for comprehensive checks
 timeout = 12
 
-# Enable multiplexing for performance
-use_multiplexing = true
-
 # More retry attempts for better accuracy
 retry_attempts = 3
 
 # Standard DNS cache TTL
 dns_cache_ttl = 600
+
+# Banner grab timeout (3s is sufficient for most hosts)
+# banner_timeout = 3
+
+# Rate limiting — uncomment to throttle (connections per second)
+# rate_limit = 10.0
+
+# Host key checking — accept-new is safe with UserKnownHostsFile=/dev/null
+# strict_host_key_checking = "accept-new"
 
 [compliance]
 # Use privacy-focused framework that excludes NSA-suspicious algorithms
@@ -30,21 +36,21 @@ framework = "PRIVACY_FOCUSED"
 # ====================================================================
 # WHAT THIS CONFIGURATION DOES
 # ====================================================================
-# 
+#
 # The PRIVACY_FOCUSED framework automatically:
-# 
+#
 # 1. FORBIDS these NSA-suspicious algorithms:
 #    - ecdh-sha2-nistp256, ecdh-sha2-nistp384, ecdh-sha2-nistp521
 #    - ecdsa-sha2-nistp256, ecdsa-sha2-nistp384, ecdsa-sha2-nistp521
-# 
+#
 # 2. REQUIRES these trusted algorithms:
 #    - curve25519-sha256 (key exchange)
 #    - ssh-ed25519 (host keys)
 #    - chacha20-poly1305@openssh.com (encryption)
 #    - aes256-gcm@openssh.com (encryption)
-# 
+#
 # 3. ENFORCES a minimum security score of 95/100
-# 
+#
 # 4. PROVIDES detailed NSA backdoor risk analysis
-# 
+#
 # ====================================================================
