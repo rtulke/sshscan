@@ -1,410 +1,560 @@
 # SSH Algorithm Security Scanner
 
-A comprehensive Python tool for SSH security auditing with advanced features including SSH multiplexing, compliance frameworks, TOML configuration, retry logic, DNS caching, and NSA backdoor detection.
+A single-file Python tool for auditing SSH algorithm configuration across one or many hosts.
+Wraps the system `ssh` binary to probe each algorithm individually — no paramiko, no authentication.
 
-## 🚀 Key Features
+**Version:** 3.1.0 | **Author:** Robert Tulke
 
-### Performance Enhancements
-- **SSH Multiplexing**: 80-90% faster scanning through connection reuse
-- **DNS Caching**: Eliminates redundant DNS lookups with TTL-based caching
-- **Retry Logic**: Exponential backoff for robust connection handling
-- **Multi-threaded Architecture**: Configurable concurrent scans (default: 20 threads)
+---
 
-### Security Analysis
-- **Compliance Frameworks**: NIST, FIPS 140-2, BSI TR-02102, ANSSI, Privacy-Focused support
-- **Security Scoring**: Algorithm strength analysis (0-100 scale)
-- **NSA Backdoor Detection**: Identifies SSH algorithms with potential NSA involvement
-- **Weak Algorithm Detection**: Flags outdated and insecure algorithms
+## What it can do
 
-### Configuration & Flexibility
-- **TOML Configuration**: Simple configuration file support
-- **Multiple Input Formats**: JSON, YAML, CSV, TXT host lists
-- **Multiple Output Formats**: Table, JSON, CSV, YAML
-- **Explicit Algorithm Testing**: Test specific algorithms only
+- Probe every cipher, MAC, key exchange, and host key algorithm a server supports
+- Score each host 0–100 based on algorithm strength
+- Detect weak and deprecated algorithms (3DES, arcfour, HMAC-MD5, DSA, ...)
+- Flag algorithms with suspected NSA involvement (NIST P-curves and related)
+- Check results against five compliance frameworks: NIST, FIPS 140-2, BSI TR-02102, ANSSI, PRIVACY_FOCUSED
+- Scan a single host, a comma-separated list, a file (JSON/YAML/CSV/TXT), or stdin
+- Filter live output by algorithm category or host result
+- Rate-limit connections to protect fragile targets
+- Export results as JSON, CSV, or YAML
+- Run fully unattended with `--summary-only` (spinner on stderr, report at the end)
 
-## 📦 Installation
+## What it cannot do
 
-### Quick Installation (Debian/Ubuntu)
+- **Not a port scanner** — assumes SSH is running on the given port; does not discover open ports
+- **No authentication** — uses `PreferredAuthentications=none`; never logs in, never executes commands
+- **No configuration push** — read-only analysis only
+- **No CVE integration** — does not map findings to CVE IDs
+- **No daemon / continuous monitoring** — single-run tool
+- **No Windows** — requires OpenSSH `ssh` in PATH (`/usr/bin/ssh` or equivalent)
+- **No paramiko** — depends on the system SSH binary; behavior reflects the installed SSH client version
+- **No scan resume** — interrupted scans cannot be continued
+
+---
+
+## Requirements
+
+| Requirement | Minimum |
+|---|---|
+| Python | 3.8+ |
+| OpenSSH client | `ssh` in PATH |
+| PyYAML | for YAML host files and YAML export |
+| toml | for TOML configuration |
+
 ```bash
-# Install dependencies
-sudo apt update && apt upgrade -y
-sudo apt install python3-toml python3-yaml python3-tqdm git -y
-
-# Clone Repository
-git clone https://github.com/rtulke/sshscan.git
-cd sshscan
-
-# Make executable
-chmod +x sshscan.py
-
-# Create configuration directory
-mkdir -p ~/.sshscan
+pip install -r requirements.txt
+# or individually:
+pip install pyyaml toml
 ```
 
-### Developer Installation (Virtual Environment)
+---
+
+## Installation
+
+### Quick (system Python)
+
 ```bash
-# Clone Repository
 git clone https://github.com/rtulke/sshscan.git
 cd sshscan
+pip install pyyaml toml
+chmod +x sshscan.py
+./sshscan.py --version
+```
 
-# Create virtual environment
+### Virtual environment (recommended)
+
+```bash
+git clone https://github.com/rtulke/sshscan.git
+cd sshscan
 python3 -m venv .venv
 source .venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Run the scanner
-python3 ./sshscan.py --help
+python3 sshscan.py --version
 ```
 
-## 🔧 Configuration
+### System-wide configuration
 
-### TOML Configuration File
-Create a `config.toml` file with the following options:
+```bash
+mkdir -p ~/.sshscan
+cp config.toml ~/.sshscan/config.toml
+# Edit to taste — loaded automatically without --config
+```
+
+---
+
+## Configuration
+
+### Config file auto-discovery (no --config needed)
+
+The scanner loads the first file found in this order:
+
+| Path | Used when |
+|---|---|
+| `--config FILE` | always highest priority |
+| `~/.sshscan/config.toml` | normal user |
+| `~/.sshscan.toml` | normal user (flat) |
+| `/etc/sshscan/config.toml` | root / system-wide |
+| `/etc/sshscan.toml` | root / system-wide (flat) |
+
+CLI arguments always override config file values.
+
+### `[scanner]` keys
+
+| Key | Type | Range | Default | CLI equivalent |
+|---|---|---|---|---|
+| `threads` | int | 1–500 | 20 | `--threads` / `-T` |
+| `timeout` | int (s) | 1–120 | 10 | `--timeout` / `-t` |
+| `retry_attempts` | int | 1–10 | 3 | `--retry-attempts` |
+| `dns_cache_ttl` | int (s) | 60–3600 | 300 | — |
+| `banner_timeout` | int (s) | 1–30 | min(timeout, 5) | `--timeout-banner` |
+| `rate_limit` | float | 0.1–1000 | unlimited | `--rate-limit` |
+| `strict_host_key_checking` | string | yes / no / accept-new | accept-new | `--strict-host-key-checking` |
+
+### `[compliance]` keys
+
+| Key | Type | Default | CLI equivalent |
+|---|---|---|---|
+| `framework` | string | none | `--compliance` |
+
+### Minimal config example
 
 ```toml
-# SSH Scanner Configuration
 [scanner]
-threads = 30              # Number of concurrent threads (1-500)
-timeout = 15              # Connection timeout in seconds
-use_multiplexing = true   # Enable SSH multiplexing
-retry_attempts = 3        # Retry attempts for failed connections
-dns_cache_ttl = 600       # DNS cache TTL in seconds
+threads = 50
+timeout = 10
 
 [compliance]
-# Available frameworks: NIST, FIPS_140_2, BSI_TR_02102, ANSSI, PRIVACY_FOCUSED
 framework = "NIST"
 ```
 
-### Using Configuration Files
-```bash
-# Use configuration file
-python3 sshscan.py --config config.toml --file servers.txt
+### Full config example
 
-# Override specific settings
-python3 sshscan.py --config config.toml --threads 50 --timeout 20
+```toml
+[scanner]
+threads = 30
+timeout = 15
+retry_attempts = 3
+dns_cache_ttl = 600
+banner_timeout = 3
+rate_limit = 10.0
+strict_host_key_checking = "accept-new"
+
+[compliance]
+framework = "BSI_TR_02102"
 ```
 
-### Load Configuration File
+### Privacy-focused preset
 
-Depending on the user, the configuration file can be read in automatically at various points in the system without specifying an additional parameter (--config | -c)
+Use `privacy_focus_config.toml` (included) for a ready-made configuration that enforces
+the `PRIVACY_FOCUSED` compliance framework:
 
-As user root:
 ```bash
-/etc/sshscan/config.toml
-/etc/sshscan.toml
+python3 sshscan.py --config privacy_focus_config.toml --file hosts.txt
 ```
 
+---
 
-As a normal user:
+## Complete Parameter Reference
+
+### General
+
+| Parameter | Short | Description |
+|---|---|---|
+| `--version` | `-V` | Print version and author, then exit |
+| `--config FILE` | `-c` | Load TOML configuration from FILE |
+| `--help` | `-h` | Show help and exit |
+
+### Host specification (mutually exclusive)
+
+| Parameter | Short | Description |
+|---|---|---|
+| `--host HOSTS` | `-H` | Single host or comma-separated list, e.g. `host1,host2:2222` |
+| `--file FILE` | `-f` | File containing hosts (.json, .yaml, .csv, .txt) |
+| `--local` | `-l` | Scan local SSH server at 127.0.0.1 |
+| *(stdin)* | | Pipe hosts when no other source is given |
+
+### Scanning options
+
+| Parameter | Short | Default | Description |
+|---|---|---|---|
+| `--port PORT` | `-p` | 22 | Default SSH port for hosts without explicit port |
+| `--threads N` | `-T` | 20 | Concurrent scan threads |
+| `--timeout SEC` | `-t` | 10 | SSH connection timeout in seconds |
+| `--retry-attempts N` | | 3 | Retry attempts with exponential backoff |
+| `--rate-limit N` | | unlimited | Max new SSH connections per second |
+| `--timeout-banner SEC` | | min(timeout,5) | Timeout for initial SSH banner grab only |
+| `--strict-host-key-checking MODE` | | accept-new | SSH StrictHostKeyChecking: yes / no / accept-new |
+
+### Algorithm testing
+
+| Parameter | Short | Description |
+|---|---|---|
+| `--explicit ALGOS` | `-e` | Test only the given comma-separated algorithms instead of the full set |
+
+### Compliance
+
+| Parameter | Description |
+|---|---|
+| `--compliance FRAMEWORK` | Check results against a framework (see table below) |
+| `--list-frameworks` | List available compliance frameworks and exit |
+| `--no-nsa-warnings` | Suppress NSA risk annotations in live output (analysis still runs; data included in exports) |
+
+### Output
+
+| Parameter | Short | Description |
+|---|---|---|
+| `--format FORMAT` | | Export format: `json`, `csv`, `yaml` |
+| `--output FILE` | `-o` | Write exported results to FILE (default: stdout) |
+| `--filter TOKENS` | | Filter live output (see Filter section) |
+| `--list-filter` | | List all filter tokens and exit |
+| `--summary` | | Print aggregated summary after scan |
+| `--summary-only` | | Suppress live output; show only summary (with spinner) |
+| `--verbose` | `-v` | Verbose logging (INFO level) |
+| `--debug` | | Full debug logging with function names and line numbers |
+
+---
+
+## Usage Examples
+
+### Single host
+
 ```bash
-~/.sshscan/config.toml
-~/.sshscan.toml
+python3 sshscan.py --host example.com
+python3 sshscan.py --host example.com:2222
+python3 sshscan.py --host 192.168.1.1
 ```
 
-## 📊 Compliance Frameworks
+### Multiple hosts
 
-### Available Frameworks
-
-| Framework | Description | Strictness |
-|-----------|-------------|------------|
-| `NIST` | NIST Cybersecurity Framework | Balanced |
-| `FIPS_140_2` | FIPS 140-2 Level 1 | Strict |
-| `BSI_TR_02102` | BSI TR-02102-4 (German Federal) | Very Strict |
-| `ANSSI` | French National Cybersecurity | Highest |
-| `PRIVACY_FOCUSED` | Anti-surveillance framework | NSA-aware |
-
-### Framework Usage
 ```bash
-# List all frameworks
-python3 sshscan.py --list-frameworks
+# Comma-separated inline
+python3 sshscan.py --host "server1.com,server2.com:2222,192.168.1.100"
 
-# Scan with specific framework
+# From a text file
+python3 sshscan.py --file hosts.txt
+
+# From stdin (any mix of commas, spaces, newlines)
+echo "server1.com server2.com:2222" | python3 sshscan.py
+cat hosts.txt | python3 sshscan.py
+
+# Multiple formats work
+printf "server1.com\n192.168.1.1:2222\nserver3.com" | python3 sshscan.py
+```
+
+### Local SSH server
+
+```bash
+python3 sshscan.py --local
+python3 sshscan.py --local --port 2222
+```
+
+### Compliance checking
+
+```bash
+# Check against NIST framework
 python3 sshscan.py --host example.com --compliance NIST
 
-# Privacy-focused scan (excludes NSA-suspicious algorithms)
+# Strict BSI check across a server fleet
+python3 sshscan.py --file servers.txt --compliance BSI_TR_02102
+
+# Privacy-focused: exclude all NIST/NSA-suspected algorithms
 python3 sshscan.py --file hosts.txt --compliance PRIVACY_FOCUSED
+
+# List all available frameworks
+python3 sshscan.py --list-frameworks
 ```
 
-## 🔍 NSA Backdoor Detection
+### Output filtering
 
-The scanner automatically detects algorithms with suspected NSA involvement:
-
-### High-Risk Algorithms (NIST Curves)
-- **Key Exchange**: `ecdh-sha2-nistp256`, `ecdh-sha2-nistp384`, `ecdh-sha2-nistp521`
-- **Host Keys**: `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521`
-
-### Recommended Alternatives
-- **Key Exchange**: `curve25519-sha256`
-- **Host Keys**: `ssh-ed25519`
-- **Encryption**: `chacha20-poly1305@openssh.com`, `aes256-gcm@openssh.com`
-
-## 📈 Usage Examples
-
-### Basic Scanning
 ```bash
-# Scan single host
+# Show only NSA-flagged algorithms
+python3 sshscan.py --host example.com --filter nsa
+
+# Show only weak algorithms
+python3 sshscan.py --file hosts.txt --filter weak
+
+# Show all flagged algorithms (weak + NSA combined)
+python3 sshscan.py --file hosts.txt --filter flagged
+
+# Show only hosts that failed compliance
+python3 sshscan.py --file hosts.txt --compliance NIST --filter failed
+
+# Show only scan errors
+python3 sshscan.py --file hosts.txt --filter error
+
+# Combine: show NSA algorithms on failed hosts only
+python3 sshscan.py --file hosts.txt --compliance NIST --filter nsa,failed
+
+# List all filter tokens
+python3 sshscan.py --list-filter
+```
+
+### Export results
+
+```bash
+# JSON export to stdout
+python3 sshscan.py --file hosts.txt --format json
+
+# JSON export to file
+python3 sshscan.py --file hosts.txt --format json --output results.json
+
+# CSV for spreadsheet import
+python3 sshscan.py --file hosts.txt --compliance NIST --format csv --output audit.csv
+
+# YAML
+python3 sshscan.py --file hosts.txt --format yaml --output results.yaml
+```
+
+### Summary mode
+
+```bash
+# Suppress live output, show only report at the end
+python3 sshscan.py --file hosts.txt --summary-only
+
+# Live output + summary at the end
+python3 sshscan.py --file hosts.txt --summary
+
+# summary-only with compliance and JSON export
+python3 sshscan.py --file hosts.txt --compliance NIST --summary-only --format json --output results.json
+```
+
+### Performance tuning
+
+```bash
+# Fast scan of a large network
+python3 sshscan.py --file large_network.txt --threads 100 --timeout 5
+
+# Gentle scan for rate-sensitive targets (5 connections/sec)
+python3 sshscan.py --file hosts.txt --rate-limit 5.0
+
+# Slow network: long timeout, short banner timeout
+python3 sshscan.py --file hosts.txt --timeout 30 --timeout-banner 5
+
+# Conservative: 10 threads, 3 retries, long timeout
+python3 sshscan.py --file hosts.txt --threads 10 --timeout 30 --retry-attempts 5
+```
+
+### Specific algorithm testing
+
+```bash
+# Test only modern recommended algorithms
+python3 sshscan.py --host example.com \
+  --explicit "chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,curve25519-sha256,ssh-ed25519"
+
+# Check if legacy weak algorithms are still supported
+python3 sshscan.py --file hosts.txt \
+  --explicit "3des-cbc,arcfour,hmac-md5,ssh-dss"
+```
+
+### NSA analysis
+
+```bash
+# Show full NSA risk analysis per host (default)
 python3 sshscan.py --host example.com
 
-# Scan multiple hosts
-python3 sshscan.py --host "server1.com,server2.com:2222,192.168.1.10"
-
-# Scan from file
-python3 sshscan.py --file hosts.txt
+# Suppress NSA annotations in live output (data still in exports)
+python3 sshscan.py --file hosts.txt --no-nsa-warnings --format json --output results.json
 ```
 
-### Resume Scanning
+### Using a config file
 
 ```bash
-# Resume interrupted scan
-python3 sshscan.py --resume scan_20240115_143022_abc123
+# Explicit config
+python3 sshscan.py --config config.toml --file servers.txt
 
-# Show saved scans
-python3 sshscan.py --list-scans
+# Override config values on the CLI
+python3 sshscan.py --config config.toml --threads 50 --timeout 20
+
+# Use privacy preset
+python3 sshscan.py --config privacy_focus_config.toml --file hosts.txt
+
+# Auto-loaded from ~/.sshscan/config.toml (no --config needed)
+python3 sshscan.py --file servers.txt
 ```
 
-example
+### Debug and logging
+
 ```bash
-Scan ID: scan_20240115_150234_def456 (use --resume scan_20240115_150234_def456 to continue if interrupted)
+# Verbose INFO logging
+python3 sshscan.py --host example.com --verbose
 
-Configuration:
-  Threads: 30
-  Timeout: 15s
-  SSH Multiplexing: enabled
-  DNS Caching: enabled (TTL: 600s)
-  Retry Attempts: 3
-  NSA Analysis: enabled
-  Compliance Framework: NIST (NIST Cybersecurity Framework)
-
-Starting scan of 100 hosts...
-================================================================================
-Scanning hosts: 100%|████████████| 100/100 [02:34<00:00,  1.54s/host]
-
-[Ergebnisse...]
-
-Failure breakdown:
-  connection: 3
-  timeout: 2
-  dns: 1
+# Full debug output (function names, line numbers)
+python3 sshscan.py --host example.com --debug
 ```
 
-### Performance Tuning
-```bash
-# High-performance scan (50 threads, multiplexing enabled)
-python3 sshscan.py --file large_network.txt --threads 50
+---
 
-# Conservative scan (5 threads, longer timeout)
-python3 sshscan.py --file hosts.txt --threads 5 --timeout 30
+## Output Filtering
 
-# Disable multiplexing for compatibility
-python3 sshscan.py --host example.com --no-multiplex
+`--filter` accepts comma-separated tokens. Algorithm and host filters can be freely combined.
+
+### Algorithm tokens (control which algorithm lines are shown)
+
+| Token | Shows |
+|---|---|
+| `supported` | Algorithms the server supports, with no warning |
+| `unsupported` | Algorithms the server does not support |
+| `flagged` | All flagged algorithms (weak + NSA combined) |
+| `weak` | Only weak/deprecated algorithms (subset of flagged) |
+| `nsa` | Only NSA-suspected algorithms (subset of flagged) |
+
+### Host tokens (show only hosts matching the condition)
+
+| Token | Shows |
+|---|---|
+| `passed` | Hosts that passed the compliance check (requires `--compliance`) |
+| `failed` | Hosts that failed the compliance check (requires `--compliance`) |
+| `error` | Hosts where the scan failed (connection error, timeout, DNS failure) |
+
+When host tokens are active, all output for a host is buffered until the scan completes,
+then either flushed or discarded based on the filter result.
+
+---
+
+## Compliance Frameworks
+
+| Framework | Description | Minimum Score |
+|---|---|---|
+| `NIST` | NIST Cybersecurity Framework — balanced baseline | 70 |
+| `FIPS_140_2` | FIPS 140-2 Level 1 — requires NIST curves, forbids Curve25519 | 90 |
+| `BSI_TR_02102` | German BSI TR-02102-4 — very strict, requires ETM MACs | 85 |
+| `ANSSI` | French ANSSI guidelines — highest strictness | 90 |
+| `PRIVACY_FOCUSED` | Anti-surveillance — forbids all NIST curves, requires Curve25519/Ed25519 | 95 |
+
+Each framework defines required and forbidden algorithms per category (cipher, MAC, KEX, host key)
+and a minimum security score. A host is compliant only when all required algorithms are present,
+no forbidden algorithms are present, and the score meets the minimum.
+
+---
+
+## NSA Backdoor Detection
+
+The scanner flags algorithms with suspected NSA design influence based on public research and
+the Snowden disclosures.
+
+### High-risk (NIST P-curves)
+
+| Category | Algorithms |
+|---|---|
+| Key exchange | `ecdh-sha2-nistp256`, `ecdh-sha2-nistp384`, `ecdh-sha2-nistp521` |
+| Host keys | `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521` |
+
+### Recommended alternatives
+
+| Purpose | Recommended |
+|---|---|
+| Key exchange | `curve25519-sha256`, `mlkem768x25519-sha256` (post-quantum) |
+| Host keys | `ssh-ed25519` |
+| Encryption | `chacha20-poly1305@openssh.com`, `aes256-gcm@openssh.com` |
+| MAC | `hmac-sha2-256-etm@openssh.com`, `hmac-sha2-512-etm@openssh.com` |
+
+NSA analysis always runs. Use `--no-nsa-warnings` to suppress the annotations in live output;
+the data is still included in all exports.
+
+---
+
+## Security Scoring
+
+Each host is scored 0–100 based on the algorithms it supports.
+
+| Score | Rating |
+|---|---|
+| 90–100 | Excellent — modern algorithms only |
+| 70–89 | Good — mostly modern, few legacy |
+| 50–69 | Fair — mixed |
+| 30–49 | Poor — many weak algorithms |
+| 0–29 | Critical — predominantly weak or NSA-flagged |
+
+Weak algorithms reduce the score proportionally. NSA-flagged algorithms apply a 1.5× penalty.
+The score must meet the framework's `minimum_score` threshold for compliance to pass.
+
+### Weak algorithms detected
+
+| Category | Algorithms |
+|---|---|
+| Cipher | DES, 3DES-CBC, Blowfish-CBC, CAST128-CBC, Arcfour, AES-CBC modes |
+| MAC | HMAC-MD5, HMAC-SHA1, HMAC-SHA1-96, UMAC-64 (and ETM variants) |
+| KEX | DH-Group1-SHA1, DH-Group14-SHA1, DH-GEX-SHA1 |
+| Host keys | DSA, RSA |
+
+---
+
+## Input File Formats
+
+### Text file (`.txt`)
+
+```
+server1.example.com
+server2.example.com:2222
+192.168.1.100
+# Lines starting with # are ignored
+[::1]:22
 ```
 
-### Explicit Algorithm Testing
-```bash
-# Test specific algorithms only
-python3 sshscan.py --host example.com \
-  --explicit "aes256-gcm@openssh.com,chacha20-poly1305@openssh.com"
+### JSON (`.json`)
 
-# Test for weak algorithms
-python3 sshscan.py --file hosts.txt \
-  --explicit "3des-cbc,des,arcfour,hmac-md5"
-```
-
-### Compliance Checking
-```bash
-# NIST compliance check
-python3 sshscan.py --file servers.txt --compliance NIST
-
-# Privacy-focused scan with JSON output
-python3 sshscan.py --file hosts.yaml --compliance PRIVACY_FOCUSED \
-  --format json --output privacy_audit.json
-```
-
-## 📄 Input File Formats
-
-### JSON Format (`hosts.json`)
 ```json
 [
-  {"host": "server1.example.com", "port": 22},
-  {"host": "server2.example.com", "port": 2222},
-  "server3.example.com:22",
+  "server1.example.com",
+  "server2.example.com:2222",
+  {"host": "server3.example.com", "port": 2222},
   "192.168.1.100"
 ]
 ```
 
-### YAML Format (`hosts.yaml`)
+### YAML (`.yaml` / `.yml`)
+
 ```yaml
-- host: server1.example.com
-  port: 22
-- host: server2.example.com
+- server1.example.com
+- server2.example.com:2222
+- host: server3.example.com
   port: 2222
-- server3.example.com:22
-- 192.168.1.100
 ```
 
-### CSV Format (`hosts.csv`)
+### CSV (`.csv`)
+
 ```csv
 server1.example.com,22
 server2.example.com,2222
 192.168.1.100,22
 ```
 
-### Text Format (`hosts.txt`)
-```
-server1.example.com:22
-server2.example.com:2222
-192.168.1.100
-# Comments are supported
-another-server.com:2222
-```
+Duplicate hosts (same IP + port) are silently skipped regardless of file format.
+IPv6 addresses use bracket notation: `[::1]:22` or `[2001:db8::1]:22`.
 
-## 📊 Output Formats
+---
 
-### Table Format (Default)
-```
-+------------------+------+---------+----------+-----------+------------+----------------------------+--------+
-| Host             | Port | Status  | Security | Compliance| NSA Risk   | Banner                     | Time(s)|
-+------------------+------+---------+----------+-----------+------------+----------------------------+--------+
-| prod-web1.com    | 22   | success | 95/100   | ✓ PASS    | ✓ LOW      | SSH-2.0-OpenSSH_9.3p1      | 1.2    |
-| legacy-db.com    | 22   | success | 35/100   | ✗ FAIL    | ⚠️  2 HIGH | SSH-2.0-OpenSSH_6.6.1      | 2.8    |
-+------------------+------+---------+----------+-----------+------------+----------------------------+--------+
-```
+## Exit Codes
 
-### JSON Format
-```bash
-python3 sshscan.py --file hosts.txt --format json --output results.json
-```
+| Code | Meaning |
+|---|---|
+| 0 | All hosts scanned successfully, no compliance failures |
+| 1 | Fatal error or usage error (bad arguments, file not found, etc.) |
+| 2 | One or more hosts failed compliance check |
+| 3 | One or more hosts had scan errors (connection failure, timeout, DNS) |
 
-### CSV Format
-```bash
-python3 sshscan.py --file hosts.txt --format csv --output results.csv
-```
+Codes 2 and 3 can occur together; code 2 takes precedence.
 
-### YAML Format
-```bash
-python3 sshscan.py --file hosts.txt --format yaml --output results.yaml
-```
+---
 
-## 🛡️ Security Scoring
+## Troubleshooting
 
-The scanner evaluates algorithm strength on a 0-100 scale:
+**All hosts time out**
+Increase timeout or reduce threads: `--timeout 30 --threads 10`
 
-| Score Range | Rating | Description |
-|-------------|--------|-------------|
-| 90-100 | Excellent | Modern algorithms only |
-| 70-89 | Good | Mostly modern, few legacy |
-| 50-69 | Fair | Mixed modern/legacy |
-| 30-49 | Poor | Many weak algorithms |
-| 0-29 | Critical | Predominantly weak |
+**"No matching cipher found" for everything**
+The local `ssh` binary may not support the algorithm. Check: `ssh -Q cipher`
 
-### Detected Weak Algorithms
-- **Encryption**: DES, 3DES-CBC, Arcfour, CBC modes
-- **MAC**: HMAC-MD5, HMAC-SHA1-96, UMAC-64
-- **Key Exchange**: DH-Group1, DH-Group14-SHA1
-- **Host Keys**: DSA, RSA
+**Scan is too slow**
+Increase threads: `--threads 50`. Ensure DNS resolves quickly (or use IP addresses directly).
 
-## ⚡ Performance Characteristics
+**Scan is hammering a target**
+Use `--rate-limit 2.0` to cap at 2 new connections per second.
 
-### Typical Performance Metrics
-| Scenario | Performance |
-|----------|------------|
-| Single host (full scan) | 1-3 seconds |
-| 50 hosts with 20 threads | ~1 minute |
-| 1000 hosts with multiplexing | ~45 minutes |
-| 1000 hosts without multiplexing | ~13 hours |
+**IPv6 hosts not connecting**
+Use bracket notation: `--host "[2001:db8::1]:22"` or put `[2001:db8::1]:22` in your host file.
 
-### DNS Cache Performance
-- Hit rate typically > 90% for domain-heavy lists
-- Reduces DNS queries by 95%+ for repeated domains
-- Configurable TTL (default: 600 seconds)
-
-## 🔧 Complete Command Reference
-
-```
-python3 sshscan.py [OPTIONS]
-
-Configuration:
-  --config, -c FILE            TOML configuration file path
-
-Host Specification (mutually exclusive):
-  --host, -H HOSTS             Single host or comma-separated list
-  --file, -f FILE              File containing hosts (.json, .yaml, .csv, .txt)
-  --local, -l                  Show local SSH client algorithms
-
-Scanning Options:
-  --port, -p PORT              Default SSH port (default: 22)
-  --threads, -T COUNT          Number of concurrent threads (default: 20)
-  --timeout, -t SECONDS        Connection timeout (default: 10)
-  --no-multiplex               Disable SSH multiplexing
-  --retry-attempts COUNT       Retry attempts for failed connections (default: 3)
-  --list-scans                 Show saved scans
-  --resume scan_20240115_143   Resume interrupted scan
-  --no-progress                Deactivate progress bar
-
-
-Algorithm Testing:
-  --explicit, -e ALGOS         Comma-separated list of specific algorithms to test
-
-Compliance:
-  --compliance FRAMEWORK       Check compliance (NIST, FIPS_140_2, BSI_TR_02102, ANSSI, PRIVACY_FOCUSED)
-  --list-frameworks            List available compliance frameworks
-  --no-nsa-analysis            Deactivate NSA analysis
-
-Output Options:
-  --format FORMAT              Output format: table, json, csv, yaml (default: table)
-  --output, -o FILE            Output file (default: stdout)
-  --verbose, -v                Verbose output with debug information
-  --stats                      Show performance statistics
-```
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-### Development Guidelines
-- Follow PEP 8 style guide
-- Add tests for new features
-- Update documentation
-- Test with various SSH implementations
-
-## 📋 Requirements
-
-- Python 3.6+
-- PyYAML (for YAML file support)
-- toml (for TOML configuration)
-- SSH client (`openssh-client`)
-- Network connectivity to target hosts
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-**"Connection timeout" errors**
-- Increase timeout: `--timeout 30`
-- Reduce threads: `--threads 10`
-- Check network connectivity
-
-**"No matching cipher found" for all algorithms**
-- Verify SSH client installation: `ssh -V`
-- Check if host allows SSH connections
-- Try with `--no-multiplex` option
-
-**High memory usage**
-- Reduce thread count
-- Process hosts in smaller batches
-- Use CSV output format for large scans
-
-**DNS resolution failures**
-- Verify DNS connectivity
-- Use IP addresses instead of hostnames
-- Increase DNS cache TTL in config
-
-## 📄 License
-
-MIT License - See LICENSE file for details
+**All algorithms show as not supported on a specific host**
+The host may be blocking the connection entirely (firewall, wrong port).
+Check the SSH banner: if it's empty, the host is not reachable on that port.
