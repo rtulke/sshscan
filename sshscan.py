@@ -3,10 +3,10 @@
 SSH Algorithm Security Scanner
 Features: Compliance Frameworks, NSA Backdoor Detection, TOML Config,
          Retry Logic, DNS Caching, Enhanced Debug Mode
-Version: 3.1.0
+Version: 3.2.0
 """
 
-__version__ = '3.1.0'
+__version__ = '3.2.0'
 __author__  = 'Robert Tulke, rt@debian.sh'
 
 import subprocess

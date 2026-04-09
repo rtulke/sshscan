@@ -3,7 +3,7 @@
 A single-file Python tool for auditing SSH algorithm configuration across one or many hosts.
 Wraps the system `ssh` binary to probe each algorithm individually — no paramiko, no authentication.
 
-**Version:** 3.1.0 | **Author:** Robert Tulke
+**Version:** 3.2.0 | **Author:** Robert Tulke
 
 ---
 

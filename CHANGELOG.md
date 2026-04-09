@@ -4,7 +4,7 @@ All notable changes to SSH Algorithm Security Scanner are documented here.
 
 ---
 
-## [3.1.0] — Current
+## [3.2.0] — Current
 
 ### New Features
 
