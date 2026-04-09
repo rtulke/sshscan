@@ -4,7 +4,45 @@ All notable changes to SSH Algorithm Security Scanner are documented here.
 
 ---
 
-## [3.3.0] — Current
+## [3.5.0] — Current
+
+### New Features
+
+- **Jump host / bastion host support** — `--jump-host [USER@]HOST[:PORT]` routes all connections
+  through an SSH jump host using OpenSSH's native `-J` flag; supports chained hops via comma-separated
+  list (e.g. `--jump-host hop1.corp,admin@hop2.corp:2222`)
+- **Generic proxy support** — `--proxy-command CMD` passes an arbitrary `ProxyCommand` to SSH;
+  enables SOCKS5 (`nc -X 5 -x socks5host:1080 %h %p`) and HTTP CONNECT (`nc -X connect -x ...`)
+- **Per-host proxy in host files** — each host entry in JSON/YAML can carry a `via` dict
+  (`type`, `host`, `port`, `user`); CSV files support four extra columns
+  (`via_type`, `via_host`, `via_port`, `via_user`); `.txt` files use the global proxy flags
+- **`ProxyConfig` data class** — internal representation with `to_ssh_args()` and `from_dict()`;
+  proxy priority: per-host `via` → `--jump-host` → `--proxy-command` → direct connection
+- **Banner scan through proxy** — when a proxy is active the SSH banner is fetched via the SSH
+  binary with `LogLevel=VERBOSE` (parses `remote software version` from stderr) instead of the
+  raw socket path, which cannot traverse jump hosts or SOCKS/HTTP proxies
+- **Config file keys** — `jump_host` and `proxy_command` added to `[scanner]`; both are also
+  configurable per-host in host files and overridable via CLI
+
+---
+
+## [3.4.0]
+
+### New Features
+
+- **Extended `--filter` tokens** — six new tokens across two new groups:
+  - **Type tokens** — filter by protocol layer: `cipher`, `mac`, `kex`, `hostkey`
+    - Composable with category tokens: `--filter kex,weak` shows only weak KEX algorithms
+    - Multiple types combine with OR: `--filter cipher,mac` shows both
+  - **Output-mode tokens** — suppress algorithm detail lines:
+    - `security` — show only security score and compliance per host (no algorithm lines)
+    - `banner` — show only the SSH banner per host (no algorithm lines)
+    - `banner`/`security` combined with type or category tokens re-enables those algo lines
+- **`--list-filter`** output expanded with all new token groups and combined examples
+
+---
+
+## [3.3.0]
 
 ### New Features
 

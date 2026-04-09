@@ -2,11 +2,10 @@
 """
 SSH Algorithm Security Scanner
 Features: Compliance Frameworks, NSA Backdoor Detection, TOML Config,
-         Retry Logic, DNS Caching, Enhanced Debug Mode
-Version: 3.2.0
+         Retry Logic, DNS Caching, Enhanced Debug Mode, JumpHost/Bastion Function
 """
 
-__version__ = '3.3.0'
+__version__ = '3.5.0'
 __author__  = 'Robert Tulke, rt@debian.sh'
 
 import subprocess
@@ -147,6 +146,50 @@ class SSHHostResult:
         timestamp = datetime.fromisoformat(ts) if isinstance(ts, str) else (ts or datetime.now())
         return cls(algorithms=algorithms, timestamp=timestamp, **d)
 
+
+
+@dataclass
+class ProxyConfig:
+    """Per-host or global proxy / jump-host configuration."""
+    type: str          # 'jump' | 'socks5' | 'http'
+    host: str          # proxy or bastion hostname / IP
+    port: int = 22     # proxy port (22 for jump, 1080 for socks5, 3128 for http)
+    user: str = ''     # SSH username for jump hosts; unused for SOCKS5/HTTP
+
+    def to_ssh_args(self) -> List[str]:
+        """Return SSH command-line arguments that route through this proxy."""
+        host = sanitize_host_input(self.host)
+        port = validate_port(self.port)
+        if self.type == 'jump':
+            user_at = f"{self.user}@" if self.user else ""
+            return ['-J', f"{user_at}{host}:{port}"]
+        elif self.type == 'socks5':
+            return ['-o', f'ProxyCommand=nc -X 5 -x {host}:{port} %h %p']
+        elif self.type == 'http':
+            return ['-o', f'ProxyCommand=nc -X connect -x {host}:{port} %h %p']
+        return []
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Optional['ProxyConfig']:
+        """Parse a ``via`` dict from a host file entry.  Returns None on error."""
+        if not isinstance(d, dict):
+            return None
+        proxy_type = str(d.get('type', '')).lower()
+        if proxy_type not in ('jump', 'socks5', 'http'):
+            logger.warning(f"ProxyConfig: unknown type {proxy_type!r}, must be jump/socks5/http")
+            return None
+        host = d.get('host', '')
+        if not host:
+            logger.warning("ProxyConfig: missing 'host'")
+            return None
+        default_port = 22 if proxy_type == 'jump' else (1080 if proxy_type == 'socks5' else 3128)
+        try:
+            port = validate_port(d.get('port', default_port))
+        except ValidationError:
+            port = default_port
+        user_raw = str(d.get('user', ''))
+        user = re.sub(r'[^a-zA-Z0-9._@-]', '', user_raw)[:64]
+        return cls(type=proxy_type, host=host, port=port, user=user)
 
 
 class EnhancedDNSCache:
@@ -426,6 +469,16 @@ class ConfigValidator:
             logger.warning(f"Invalid strict_host_key_checking value: {sshkc!r}, "
                            f"using 'accept-new' (valid: {', '.join(_SSHKC_VALUES)})")
             validated['scanner']['strict_host_key_checking'] = 'accept-new'
+
+        # jump_host (optional — None = no jump host)
+        jump_host = scanner_config.get('jump_host', None)
+        if jump_host:
+            validated['scanner']['jump_host'] = str(jump_host).strip()
+
+        # proxy_command (optional — raw ProxyCommand string, passed through as-is)
+        proxy_command = scanner_config.get('proxy_command', None)
+        if proxy_command:
+            validated['scanner']['proxy_command'] = str(proxy_command).strip()
 
         # Compliance configuration (optional — no framework = no compliance check)
         compliance_config = config.get('compliance', {})
@@ -1096,7 +1149,10 @@ class SSHEnhancedScanner:
         self.strict_host_key_checking: str = scanner_config.get('strict_host_key_checking', 'accept-new')
         self.use_color: bool = sys.stdout.isatty()  # auto-disabled when piped; override via --no-color
         self.show_hostnames: bool = False
-        self._hostname_map: Dict[str, str] = {}  # resolved_ip → original_hostname
+        self._hostname_map: Dict[str, str] = {}   # resolved_ip → original_hostname
+        self.jump_host: Optional[str] = scanner_config.get('jump_host', None)
+        self.proxy_command: Optional[str] = scanner_config.get('proxy_command', None)
+        self._proxy_map: Dict[str, ProxyConfig] = {}  # "host:port" → ProxyConfig
 
         logger.info(f"Initialized scanner with {self.max_workers} threads, "
                    f"DNS cache TTL={self.dns_cache_ttl}s")
@@ -1201,10 +1257,16 @@ class SSHEnhancedScanner:
                                 resolved_ip = self.dns_cache.resolve(host)
                                 if resolved_ip and resolved_ip != host:
                                     self._hostname_map[resolved_ip] = host
-                                host_tuple = (resolved_ip or host, port)
+                                effective_host = resolved_ip or host
+                                host_tuple = (effective_host, port)
                                 if host_tuple not in seen_hosts:
                                     hosts.append(host_tuple)
                                     seen_hosts.add(host_tuple)
+                                    via = item.get('via')
+                                    if via:
+                                        proxy = ProxyConfig.from_dict(via)
+                                        if proxy:
+                                            self._proxy_map[f"{effective_host}:{port}"] = proxy
                                 else:
                                     _skipped += 1
 
@@ -1226,10 +1288,16 @@ class SSHEnhancedScanner:
                                 resolved_ip = self.dns_cache.resolve(host)
                                 if resolved_ip and resolved_ip != host:
                                     self._hostname_map[resolved_ip] = host
-                                host_tuple = (resolved_ip or host, port)
+                                effective_host = resolved_ip or host
+                                host_tuple = (effective_host, port)
                                 if host_tuple not in seen_hosts:
                                     hosts.append(host_tuple)
                                     seen_hosts.add(host_tuple)
+                                    via = item.get('via')
+                                    if via:
+                                        proxy = ProxyConfig.from_dict(via)
+                                        if proxy:
+                                            self._proxy_map[f"{effective_host}:{port}"] = proxy
                                 else:
                                     _skipped += 1
 
@@ -1245,10 +1313,25 @@ class SSHEnhancedScanner:
                                     resolved_ip = self.dns_cache.resolve(host)
                                     if resolved_ip and resolved_ip != host:
                                         self._hostname_map[resolved_ip] = host
-                                    host_tuple = (resolved_ip or host, port)
+                                    effective_host = resolved_ip or host
+                                    host_tuple = (effective_host, port)
                                     if host_tuple not in seen_hosts:
                                         hosts.append(host_tuple)
                                         seen_hosts.add(host_tuple)
+                                        # Optional per-host proxy columns:
+                                        # col2=via_type, col3=via_host, col4=via_port, col5=via_user
+                                        if len(row) >= 4 and row[2].strip() and row[3].strip():
+                                            via_dict = {
+                                                'type': row[2].strip(),
+                                                'host': row[3].strip(),
+                                            }
+                                            if len(row) >= 5 and row[4].strip():
+                                                via_dict['port'] = row[4].strip()
+                                            if len(row) >= 6 and row[5].strip():
+                                                via_dict['user'] = row[5].strip()
+                                            proxy = ProxyConfig.from_dict(via_dict)
+                                            if proxy:
+                                                self._proxy_map[f"{effective_host}:{port}"] = proxy
                                 except (ValueError, ValidationError) as e:
                                     logger.warning(f"Invalid entry in CSV: {row} - {e}")
                             else:
@@ -1333,6 +1416,51 @@ class SSHEnhancedScanner:
         self._local_algorithms_cache = results
         return results
     
+    def _proxy_args_for(self, host: str, port: int) -> List[str]:
+        """Return SSH args that route through the proxy for this host.
+
+        Priority: per-host entry in _proxy_map → global jump_host → global proxy_command → no proxy.
+        """
+        proxy = self._proxy_map.get(f"{host}:{port}")
+        if proxy:
+            return proxy.to_ssh_args()
+        if self.jump_host:
+            return ['-J', self.jump_host]
+        if self.proxy_command:
+            return ['-o', f'ProxyCommand={self.proxy_command}']
+        return []
+
+    def _scan_banner_via_ssh(self, host: str, port: int, proxy_args: List[str],
+                             timeout: int) -> Optional[str]:
+        """Grab the SSH banner through a proxy/jump-host via the SSH binary.
+
+        Uses LogLevel=VERBOSE and parses the 'Remote protocol version' debug line.
+        Falls back to None if the line is not found.
+        """
+        cmd = [
+            'ssh',
+            '-o', 'BatchMode=yes',
+            '-o', f'ConnectTimeout={timeout}',
+            '-o', 'StrictHostKeyChecking=no',
+            '-o', 'UserKnownHostsFile=/dev/null',
+            '-o', 'LogLevel=VERBOSE',
+            '-o', 'PreferredAuthentications=none',
+            '-p', str(port),
+        ] + proxy_args + [host, 'exit']
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=timeout + 2, check=False,
+            )
+            for line in result.stderr.split('\n'):
+                m = re.search(r'remote software version (.+)', line, re.IGNORECASE)
+                if m:
+                    version = m.group(1).strip()
+                    return f"SSH-2.0-{version}"
+        except Exception as e:
+            logger.debug(f"Banner via SSH failed for {host}:{port}: {e}")
+        return None
+
     @retry_on_failure(max_attempts=2, backoff_factor=1.0)
     def test_algorithm_connection(self, host: str, algorithm: str, algo_type: str, port: int = 22) -> bool:
         """Test whether a remote SSH server supports a specific algorithm.
@@ -1368,6 +1496,7 @@ class SSHEnhancedScanner:
             '-o', 'LogLevel=ERROR',
             '-o', 'UserKnownHostsFile=/dev/null',
             '-p', str(port),
+        ] + self._proxy_args_for(host, port) + [
             host,
             'exit'
         ]
@@ -1412,12 +1541,23 @@ class SSHEnhancedScanner:
     
     @retry_on_failure(max_attempts=2, backoff_factor=1.0)
     def scan_ssh_banner(self, host: str, port: int = 22, timeout: int = None) -> Optional[str]:
-        """Get SSH banner with retry logic and configurable timeout"""
+        """Get SSH banner with retry logic and configurable timeout.
+
+        When a proxy or jump-host is configured for this host the banner is fetched
+        via the SSH binary (LogLevel=VERBOSE) instead of a raw socket, because raw
+        sockets cannot traverse jump-hosts or SOCKS/HTTP proxies without additional
+        libraries.
+        """
         if timeout is None:
             timeout = self.banner_timeout if self.banner_timeout is not None else min(self.timeout, 5)
-        
+
+        proxy_args = self._proxy_args_for(host, port)
+        if proxy_args:
+            logger.debug(f"Scanning SSH banner for {host}:{port} via proxy")
+            return self._scan_banner_via_ssh(host, port, proxy_args, timeout)
+
         logger.debug(f"Scanning SSH banner for {host}:{port}")
-        
+
         try:
             with socket.create_connection((host, port), timeout=timeout) as sock:
                 banner_raw = sock.recv(1024).decode('utf-8', errors='ignore').strip()
@@ -1467,6 +1607,13 @@ class SSHEnhancedScanner:
 
         use_buffer = bool(self.filter_hosts) and not self.summary_only
 
+        # Pre-compute filter components once so on_algorithm doesn't recompute per call
+        _F_TYPE_MAP = {'cipher': 'cipher', 'mac': 'mac', 'kex': 'kex', 'hostkey': 'key'}
+        _f_types = {_F_TYPE_MAP[t] for t in self.filter_algo if t in _F_TYPE_MAP}
+        _f_cats  = self.filter_algo & {'supported', 'unsupported', 'flagged', 'weak', 'nsa'}
+        # 'banner' or 'security' with no type/category tokens → suppress all algo detail lines
+        _suppress_algos = bool(self.filter_algo) and not _f_types and not _f_cats
+
         def _emit(line: str) -> None:
             """Print line directly or buffer it when host-level filtering is active."""
             with self.lock:
@@ -1495,15 +1642,23 @@ class SSHEnhancedScanner:
 
             # Apply algo filter (empty = show all)
             if self.filter_algo:
-                show = (
-                    ('supported' in self.filter_algo and category == 'supported') or
-                    ('unsupported' in self.filter_algo and category == 'unsupported') or
-                    ('flagged' in self.filter_algo and category in ('nsa', 'weak')) or
-                    ('weak' in self.filter_algo and category == 'weak') or
-                    ('nsa' in self.filter_algo and category == 'nsa')
-                )
-                if not show:
+                # 'banner' / 'security' without any type or category token → suppress all algo lines
+                if _suppress_algos:
                     return
+                # Type filter: cipher / mac / kex / hostkey
+                if _f_types and algo_type not in _f_types:
+                    return
+                # Category filter: supported / unsupported / flagged / weak / nsa
+                if _f_cats:
+                    show = (
+                        ('supported' in _f_cats and category == 'supported') or
+                        ('unsupported' in _f_cats and category == 'unsupported') or
+                        ('flagged' in _f_cats and category in ('nsa', 'weak')) or
+                        ('weak' in _f_cats and category == 'weak') or
+                        ('nsa' in _f_cats and category == 'nsa')
+                    )
+                    if not show:
+                        return
 
             # Build line
             if not is_supported:
@@ -2142,6 +2297,10 @@ Examples:
                         choices=['yes', 'no', 'accept-new'],
                         metavar='MODE',
                         help='SSH StrictHostKeyChecking: yes, no, accept-new (default: accept-new)')
+    parser.add_argument('--jump-host', default=None, metavar='[USER@]HOST[:PORT]',
+                        help='Route all connections through an SSH jump/bastion host, e.g. admin@bastion.corp:22')
+    parser.add_argument('--proxy-command', default=None, metavar='CMD',
+                        help='Route all connections via a ProxyCommand, e.g. "nc -X 5 -x socks5host:1080 %%h %%p"')
 
     # Algorithm testing
     parser.add_argument('--explicit', '-e', metavar='ALGOS',
@@ -2164,8 +2323,11 @@ Examples:
     parser.add_argument('--output', '-o', metavar='FILE',
                         help='Write exported results to FILE')
     parser.add_argument('--filter', metavar='TOKENS',
-                        help='Filter output. Algo: supported, unsupported, flagged, weak, nsa. '
-                             'Host: passed, failed, error. Comma-separated, e.g.: --filter supported,nsa')
+                        help='Filter output. Category: supported, unsupported, flagged, weak, nsa. '
+                             'Type: cipher, mac, kex, hostkey. '
+                             'Output mode: banner, security. '
+                             'Host: passed, failed, error. '
+                             'Combinable, e.g.: --filter kex,weak  --filter banner,security')
     parser.add_argument('--summary', action='store_true',
                         help='Print summary report after scan')
     parser.add_argument('--summary-only', action='store_true',
@@ -2196,24 +2358,41 @@ Examples:
     # --list-filter: no scanner needed
     if args.list_filter:
         print("Available --filter tokens:\n")
-        print("  Algorithm filters (control which algorithm lines are shown):")
-        print(f"  {'supported':<16} Show supported algorithms with no flag  [x]")
-        print(f"  {'unsupported':<16} Show algorithms not supported by the server  [-]")
-        print(f"  {'flagged':<16} Show all flagged algorithms (weak + NSA)  [!]")
-        print(f"  {'weak':<16} Show only weak algorithms (subset of flagged)  [!]")
-        print(f"  {'nsa':<16} Show only NSA-suspicious algorithms (subset of flagged)  [!]")
+        print("  Category filters (filter by security classification):")
+        print(f"  {'supported':<16} Supported algorithms with no warning  [x]")
+        print(f"  {'unsupported':<16} Algorithms the server does not support  [-]")
+        print(f"  {'flagged':<16} All flagged algorithms (weak + NSA combined)  [!]")
+        print(f"  {'weak':<16} Weak/deprecated algorithms only  [!]")
+        print(f"  {'nsa':<16} NSA-suspicious algorithms only  [!]")
+        print()
+        print("  Type filters (filter by protocol layer):")
+        print(f"  {'cipher':<16} Cipher / encryption algorithms only")
+        print(f"  {'mac':<16} MAC algorithms only")
+        print(f"  {'kex':<16} Key exchange algorithms only")
+        print(f"  {'hostkey':<16} Host key algorithms only")
+        print()
+        print("  Output mode (suppress algorithm detail lines):")
+        print(f"  {'security':<16} Show only security score and compliance per host")
+        print(f"  {'banner':<16} Show only the SSH banner per host")
         print()
         print("  Host filters (show only hosts matching the condition):")
         print(f"  {'passed':<16} Hosts that passed the compliance check (requires --compliance)")
         print(f"  {'failed':<16} Hosts that failed the compliance check (requires --compliance)")
         print(f"  {'error':<16} Hosts where the scan failed (connection error, timeout, etc.)")
         print()
-        print("  Tokens are comma-separated. Algo and host filters can be combined.")
+        print("  All token groups are composable. Type and category tokens combine with AND.")
+        print("  'banner'/'security' alone suppress algo lines; pairing with type/category re-enables them.")
+        print()
         print("  Examples:")
-        print("    --filter supported")
-        print("    --filter flagged")
-        print("    --filter nsa,failed")
-        print("    --filter supported,unsupported,failed")
+        print("    --filter weak                     weak algorithms of any type")
+        print("    --filter kex                      all KEX algorithms")
+        print("    --filter kex,weak                 weak KEX algorithms only")
+        print("    --filter cipher,nsa               NSA-flagged cipher algorithms")
+        print("    --filter security                 score + compliance per host, no algo detail")
+        print("    --filter banner                   SSH banner per host, no algo detail")
+        print("    --filter banner,security          banner + score, no algo detail")
+        print("    --filter security,nsa             score + NSA algo lines")
+        print("    --filter nsa,failed               NSA lines, compliance-failed hosts only")
         return 0
 
     # Load config file if specified
@@ -2244,6 +2423,10 @@ Examples:
         config['scanner']['banner_timeout'] = args.timeout_banner
     if args.strict_host_key_checking is not None:
         config['scanner']['strict_host_key_checking'] = args.strict_host_key_checking
+    if args.jump_host is not None:
+        config['scanner']['jump_host'] = args.jump_host
+    if args.proxy_command is not None:
+        config['scanner']['proxy_command'] = args.proxy_command
 
     if args.compliance:
         if 'compliance' not in config:
@@ -2285,7 +2468,11 @@ Examples:
                 scanner.spinner = Spinner('Scanning')
 
             # Parse --filter tokens
-            _ALGO_TOKENS = {'supported', 'unsupported', 'flagged', 'weak', 'nsa'}
+            _ALGO_TOKENS = {
+                'supported', 'unsupported', 'flagged', 'weak', 'nsa',  # category
+                'cipher', 'mac', 'kex', 'hostkey',                      # type
+                'banner', 'security',                                    # output mode
+            }
             _HOST_TOKENS = {'passed', 'failed', 'error'}
             if args.filter:
                 tokens = {t.strip().lower() for t in args.filter.split(',') if t.strip()}

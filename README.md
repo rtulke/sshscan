@@ -3,7 +3,7 @@
 A single-file Python tool for auditing SSH algorithm configuration across one or many hosts.
 Wraps the system `ssh` binary to probe each algorithm individually — no paramiko, no authentication.
 
-**Version:** 3.3.0 | **Author:** Robert Tulke
+**Version:** 3.5.0 | **Author:** Robert Tulke
 
 ---
 
@@ -37,16 +37,24 @@ Wraps the system `ssh` binary to probe each algorithm individually — no parami
   - [Local SSH server](#local-ssh-server)
   - [Compliance checking](#compliance-checking)
   - [Output filtering](#output-filtering)
+  - [Jump host / proxy](#jump-host--proxy)
   - [Export results](#export-results)
   - [Summary mode](#summary-mode)
   - [Performance tuning](#performance-tuning)
   - [Specific algorithm testing](#specific-algorithm-testing)
   - [NSA analysis](#nsa-analysis)
   - [Using a config file](#using-a-config-file)
+  - [Jump host / proxy](#jump-host--proxy)
   - [Debug and logging](#debug-and-logging)
+- [Jump Hosts and Proxies](#jump-hosts-and-proxies)
+  - [Global proxy (all hosts)](#global-proxy-all-hosts)
+  - [Per-host proxy (mixed environments)](#per-host-proxy-mixed-environments)
+  - [Priority order](#priority-order)
 - [Output Filtering](#output-filtering-1)
-  - [Algorithm tokens](#algorithm-tokens-control-which-algorithm-lines-are-shown)
-  - [Host tokens](#host-tokens-show-only-hosts-matching-the-condition)
+  - [Category tokens](#category-tokens)
+  - [Type tokens](#type-tokens)
+  - [Output mode tokens](#output-mode-tokens)
+  - [Host tokens](#host-tokens)
 - [Compliance Frameworks](#compliance-frameworks)
 - [NSA Backdoor Detection](#nsa-backdoor-detection)
   - [High-risk (NIST P-curves)](#high-risk-nist-p-curves)
@@ -184,6 +192,8 @@ CLI arguments always override config file values.
 | `banner_timeout` | int (s) | 1–30 | min(timeout, 5) | `--timeout-banner` |
 | `rate_limit` | float | 0.1–1000 | unlimited | `--rate-limit` |
 | `strict_host_key_checking` | string | yes / no / accept-new | accept-new | `--strict-host-key-checking` |
+| `jump_host` | string | `[user@]host[:port]` | — | `--jump-host` |
+| `proxy_command` | string | ProxyCommand | — | `--proxy-command` |
 
 ### `[compliance]` keys
 
@@ -259,6 +269,8 @@ python3 sshscan.py --config privacy_focus.conf --file hosts.txt
 | `--rate-limit N` | | unlimited | Max new SSH connections per second |
 | `--timeout-banner SEC` | | min(timeout,5) | Timeout for initial SSH banner grab only |
 | `--strict-host-key-checking MODE` | | accept-new | SSH StrictHostKeyChecking: yes / no / accept-new |
+| `--jump-host [USER@]HOST[:PORT]` | | — | Route all connections through an SSH jump / bastion host |
+| `--proxy-command CMD` | | — | Route all connections via a ProxyCommand (SOCKS5/HTTP CONNECT) |
 
 ### Algorithm testing
 
@@ -350,6 +362,24 @@ python3 sshscan.py --file hosts.txt --filter weak
 
 # Show all flagged algorithms (weak + NSA combined)
 python3 sshscan.py --file hosts.txt --filter flagged
+
+# Type tokens: show only KEX algorithms
+python3 sshscan.py --host example.com --filter kex
+
+# Type + category: show only weak KEX algorithms
+python3 sshscan.py --file hosts.txt --filter kex,weak
+
+# Type + category: show weak ciphers and MACs
+python3 sshscan.py --file hosts.txt --filter cipher,mac,weak
+
+# Output mode: show only security score and compliance line per host (no algo lines)
+python3 sshscan.py --file hosts.txt --compliance NIST --filter security
+
+# Output mode: show only SSH banners per host
+python3 sshscan.py --file hosts.txt --filter banner
+
+# Output mode + category: banners + NSA algorithm lines
+python3 sshscan.py --file hosts.txt --filter banner,nsa
 
 # Show only hosts that failed compliance
 python3 sshscan.py --file hosts.txt --compliance NIST --filter failed
@@ -447,6 +477,51 @@ python3 sshscan.py --config privacy_focus.conf --file hosts.txt
 python3 sshscan.py --file servers.txt
 ```
 
+### Jump host / proxy
+
+```bash
+# All hosts through a bastion (SSH jump host)
+python3 sshscan.py --file internal-hosts.txt --jump-host admin@bastion.corp:22
+
+# Multiple jump hops (comma-separated, OpenSSH syntax)
+python3 sshscan.py --file hosts.txt --jump-host "hop1.corp,admin@hop2.corp:2222"
+
+# All hosts through a SOCKS5 proxy (e.g. an SSH -D tunnel)
+python3 sshscan.py --file hosts.txt --proxy-command "nc -X 5 -x 127.0.0.1:1080 %h %p"
+
+# All hosts through an HTTP CONNECT proxy
+python3 sshscan.py --file hosts.txt --proxy-command "nc -X connect -x proxy.corp:3128 %h %p"
+```
+
+Per-host proxy via YAML host file:
+
+```yaml
+# hosts.yaml
+- host: internal1.corp
+  via:
+    type: jump
+    host: bastion1.corp
+    port: 22
+    user: admin
+
+- host: internal2.corp
+  via:
+    type: socks5
+    host: 127.0.0.1
+    port: 1080
+
+- host: public.example.com   # no via — direct connection
+```
+
+Per-host proxy via CSV host file (columns: `host,port,via_type,via_host[,via_port[,via_user]]`):
+
+```csv
+internal1.corp,22,jump,bastion1.corp,22,admin
+internal2.corp,22,socks5,127.0.0.1,1080
+dmz-host.corp,2222,http,proxy.corp,3128
+public.example.com,22
+```
+
 ### Debug and logging
 
 ```bash
@@ -459,30 +534,131 @@ python3 sshscan.py --host example.com --debug
 
 ---
 
+## Jump Hosts and Proxies
+
+Route scan traffic through SSH jump hosts (bastions) or SOCKS5/HTTP CONNECT proxies.
+Useful for scanning internal networks that are not directly reachable from the scanning machine.
+
+### Global proxy (all hosts)
+
+Apply the same proxy to every host in a scan run:
+
+```bash
+# SSH jump host
+python3 sshscan.py --file internal.yaml --jump-host admin@bastion.corp
+
+# SOCKS5 (e.g. an SSH -D dynamic tunnel)
+python3 sshscan.py --file hosts.txt --proxy-command "nc -X 5 -x 127.0.0.1:1080 %h %p"
+
+# HTTP CONNECT proxy
+python3 sshscan.py --file hosts.txt --proxy-command "nc -X connect -x proxy.corp:3128 %h %p"
+```
+
+Or set in `sshscan.conf`:
+
+```ini
+[scanner]
+jump_host = admin@bastion.corp:22
+# proxy_command = nc -X 5 -x socks5proxy.corp:1080 %h %p
+```
+
+### Per-host proxy (mixed environments)
+
+Different hosts can have different proxies by adding a `via` field to JSON/YAML host files,
+or extra columns to CSV files.
+
+**YAML** — `via` dict with keys: `type` (`jump`/`socks5`/`http`), `host`, `port`, `user` (optional):
+
+```yaml
+- host: internal-db.corp
+  via: {type: jump, host: bastion1.corp, port: 22, user: dbteam}
+
+- host: dmz-web.corp
+  via: {type: http, host: proxy.corp, port: 3128}
+
+- host: external.example.com
+  # no via — direct connection
+```
+
+**JSON** — same structure:
+
+```json
+[
+  {"host": "internal-db.corp", "port": 22, "via": {"type": "jump", "host": "bastion1.corp", "user": "dbteam"}},
+  {"host": "dmz-web.corp",     "port": 22, "via": {"type": "http",  "host": "proxy.corp", "port": 3128}},
+  {"host": "external.example.com"}
+]
+```
+
+**CSV** — extra columns after `host,port`: `via_type,via_host[,via_port[,via_user]]`:
+
+```csv
+internal-db.corp,22,jump,bastion1.corp,22,dbteam
+dmz-web.corp,22,http,proxy.corp,3128
+external.example.com,22
+```
+
+### Priority order
+
+Per-host `via` → `--jump-host` (global) → `--proxy-command` (global) → direct connection.
+
+### Notes
+
+- Jump hosts require SSH key auth (no password prompt) — `BatchMode=yes` is always set
+- When a proxy is active, the SSH banner is fetched via the SSH binary rather than a raw socket
+- Use `--rate-limit` to avoid overwhelming the bastion with parallel connections
+
+---
+
 ## Output Filtering
 
-`--filter` accepts comma-separated tokens. Algorithm and host filters can be freely combined.
+`--filter` accepts comma-separated tokens from any of the groups below.
+All groups are composable. Type and category tokens combine with AND within their group.
+Run `--list-filter` for a full reference with examples.
 
-### Algorithm tokens (control which algorithm lines are shown)
+### Category tokens
+
+Filter by security classification:
+
+| Token | Shows | Marker |
+|---|---|---|
+| `supported` | Algorithms the server supports, no warning | `[x]` |
+| `unsupported` | Algorithms the server does not support | `[-]` |
+| `flagged` | All flagged algorithms (weak + NSA combined) | `[!]` |
+| `weak` | Weak/deprecated algorithms only (subset of flagged) | `[!]` |
+| `nsa` | NSA-suspected algorithms only (subset of flagged) | `[!]` |
+
+### Type tokens
+
+Filter by protocol layer. Composable with category tokens (`--filter kex,weak` = weak KEX only):
 
 | Token | Shows |
 |---|---|
-| `supported` | Algorithms the server supports, with no warning |
-| `unsupported` | Algorithms the server does not support |
-| `flagged` | All flagged algorithms (weak + NSA combined) |
-| `weak` | Only weak/deprecated algorithms (subset of flagged) |
-| `nsa` | Only NSA-suspected algorithms (subset of flagged) |
+| `cipher` | Cipher / encryption algorithm lines |
+| `mac` | MAC algorithm lines |
+| `kex` | Key exchange algorithm lines |
+| `hostkey` | Host key algorithm lines |
 
-### Host tokens (show only hosts matching the condition)
+### Output mode tokens
+
+Suppress per-algorithm lines entirely; show only the specified host-level line.
+Pairing with type or category tokens re-enables those matching algorithm lines.
+
+| Token | Shows |
+|---|---|
+| `security` | Security score and compliance line per host |
+| `banner` | SSH banner line per host |
+
+### Host tokens
+
+Show only hosts matching the condition. All output for a host is buffered until the scan
+completes, then flushed or discarded based on the result.
 
 | Token | Shows |
 |---|---|
 | `passed` | Hosts that passed the compliance check (requires `--compliance`) |
 | `failed` | Hosts that failed the compliance check (requires `--compliance`) |
 | `error` | Hosts where the scan failed (connection error, timeout, DNS failure) |
-
-When host tokens are active, all output for a host is buffered until the scan completes,
-then either flushed or discarded based on the filter result.
 
 ---
 
