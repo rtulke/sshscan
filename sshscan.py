@@ -6,7 +6,7 @@ Features: Compliance Frameworks, NSA Backdoor Detection, TOML Config,
 Version: 3.2.0
 """
 
-__version__ = '3.2.0'
+__version__ = '3.3.0'
 __author__  = 'Robert Tulke, rt@debian.sh'
 
 import subprocess
@@ -30,6 +30,22 @@ import shutil
 import io
 import logging
 from datetime import datetime
+
+# ---------------------------------------------------------------------------
+# ANSI color helpers (no external dependency; auto-disabled when not a TTY)
+# ---------------------------------------------------------------------------
+_C_RESET  = '\033[0m'
+_C_BOLD   = '\033[1m'
+_C_DIM    = '\033[2m'
+_C_RED    = '\033[31m'
+_C_GREEN  = '\033[32m'
+_C_YELLOW = '\033[33m'
+_C_CYAN   = '\033[36m'
+
+def _colorize(text: str, code: str, enabled: bool) -> str:
+    """Wrap text in ANSI escape code; no-op when enabled is False."""
+    return f"{code}{text}{_C_RESET}" if enabled else text
+
 
 def setup_logging(debug_enabled=False, verbose_enabled=False):
     """Setup logging with proper debug support"""
@@ -97,6 +113,7 @@ class SSHHostResult:
     """Data class for SSH host scan results"""
     host: str
     port: int
+    hostname: str = ""  # original DNS name if resolved; empty when host was already an IP
     status: str = "unknown"  # success, failed, timeout, error
     security_score: int = 0
     compliance_status: Dict[str, bool] = field(default_factory=dict)
@@ -1077,6 +1094,9 @@ class SSHEnhancedScanner:
         self.rate_limit: Optional[float] = scanner_config.get('rate_limit', None)
         self.banner_timeout: Optional[int] = scanner_config.get('banner_timeout', None)
         self.strict_host_key_checking: str = scanner_config.get('strict_host_key_checking', 'accept-new')
+        self.use_color: bool = sys.stdout.isatty()  # auto-disabled when piped; override via --no-color
+        self.show_hostnames: bool = False
+        self._hostname_map: Dict[str, str] = {}  # resolved_ip → original_hostname
 
         logger.info(f"Initialized scanner with {self.max_workers} threads, "
                    f"DNS cache TTL={self.dns_cache_ttl}s")
@@ -1141,6 +1161,9 @@ class SSHEnhancedScanner:
         # Resolve hostname using DNS cache
         resolved_ip = self.dns_cache.resolve(host.strip())
         if resolved_ip:
+            original = host.strip()
+            if original != resolved_ip:
+                self._hostname_map[resolved_ip] = original
             logger.debug(f"Parsed and resolved {host_string} -> {resolved_ip}:{port}")
             return resolved_ip, port
         else:
@@ -1176,13 +1199,15 @@ class SSHEnhancedScanner:
                                 host = sanitize_host_input(item['host'])
                                 port = validate_port(item.get('port', default_port))
                                 resolved_ip = self.dns_cache.resolve(host)
+                                if resolved_ip and resolved_ip != host:
+                                    self._hostname_map[resolved_ip] = host
                                 host_tuple = (resolved_ip or host, port)
                                 if host_tuple not in seen_hosts:
                                     hosts.append(host_tuple)
                                     seen_hosts.add(host_tuple)
                                 else:
                                     _skipped += 1
-            
+
             elif file_path.suffix.lower() in ['.yml', '.yaml']:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     data = yaml.safe_load(f)
@@ -1199,13 +1224,15 @@ class SSHEnhancedScanner:
                                 host = sanitize_host_input(item['host'])
                                 port = validate_port(item.get('port', default_port))
                                 resolved_ip = self.dns_cache.resolve(host)
+                                if resolved_ip and resolved_ip != host:
+                                    self._hostname_map[resolved_ip] = host
                                 host_tuple = (resolved_ip or host, port)
                                 if host_tuple not in seen_hosts:
                                     hosts.append(host_tuple)
                                     seen_hosts.add(host_tuple)
                                 else:
                                     _skipped += 1
-            
+
             elif file_path.suffix.lower() == '.csv':
                 with open(file_path, 'r', encoding='utf-8') as f:
                     reader = csv.reader(f)
@@ -1216,6 +1243,8 @@ class SSHEnhancedScanner:
                                     host = sanitize_host_input(row[0].strip())
                                     port = validate_port(row[1].strip())
                                     resolved_ip = self.dns_cache.resolve(host)
+                                    if resolved_ip and resolved_ip != host:
+                                        self._hostname_map[resolved_ip] = host
                                     host_tuple = (resolved_ip or host, port)
                                     if host_tuple not in seen_hosts:
                                         hosts.append(host_tuple)
@@ -1421,8 +1450,12 @@ class SSHEnhancedScanner:
     def scan_single_host(self, host: str, port: int, explicit_algorithms: List[str] = None) -> SSHHostResult:
         """Scan single host with live per-algorithm output"""
         start_time = time.time()
-        result = SSHHostResult(host=host, port=port)
-        host_label = f"{host}:{port}"
+        original_name = self._hostname_map.get(host, '')
+        result = SSHHostResult(host=host, port=port, hostname=original_name)
+        if self.show_hostnames and original_name:
+            host_label = f"{original_name}:{port}"
+        else:
+            host_label = f"{host}:{port}"
 
         _algo_labels = {
             'cipher': 'Cipher',
@@ -1488,6 +1521,18 @@ class SSHEnhancedScanner:
             else:
                 line = f"[x] Host: {host_label}  {label}: {algo_name}"
 
+            # Apply color based on category
+            if self.use_color:
+                if category == 'unsupported':
+                    line = _colorize(line, _C_DIM, True)
+                elif category == 'nsa':
+                    nsa_color = _C_RED if nsa_info.get('risk', '').upper() in ('HIGH', 'CRITICAL') else _C_YELLOW
+                    line = _colorize(line, nsa_color, True)
+                elif category == 'weak':
+                    line = _colorize(line, _C_YELLOW, True)
+                else:  # supported
+                    line = _colorize(line, _C_GREEN, True)
+
             _emit(line)
 
         logger.debug(f"Starting scan of {host}:{port}")
@@ -1502,7 +1547,7 @@ class SSHEnhancedScanner:
                 logger.debug(f"No SSH banner received from {host}:{port}")
             else:
                 if not self.summary_only:
-                    _emit(f"[x] Host: {host_label}  Banner: {result.ssh_banner}")
+                    _emit(_colorize(f"[x] Host: {host_label}  Banner: {result.ssh_banner}", _C_CYAN, self.use_color))
 
                 if explicit_algorithms:
                     explicit_results = self.test_explicit_algorithms(host, port, explicit_algorithms)
@@ -1557,17 +1602,19 @@ class SSHEnhancedScanner:
 
         if not self.summary_only:
             if result.status == 'success':
-                _emit(f"[x] Host: {host_label}  Security Score: {result.security_score}/100")
+                _emit(_colorize(f"[x] Host: {host_label}  Security Score: {result.security_score}/100", _C_GREEN, self.use_color))
                 if result.compliance_status and 'overall_compliant' in result.compliance_status:
                     fw = self.compliance_framework or 'N/A'
-                    status_str = "PASS" if result.compliance_status['overall_compliant'] else "FAIL"
-                    _emit(f"[x] Host: {host_label}  Compliance {fw}: {status_str}")
+                    compliant = result.compliance_status['overall_compliant']
+                    status_str = "PASS" if compliant else "FAIL"
+                    cpl_color = _C_GREEN if compliant else _C_RED
+                    _emit(_colorize(f"[x] Host: {host_label}  Compliance {fw}: {status_str}", cpl_color, self.use_color))
             else:
                 err = f" ({result.error_type})" if result.error_type else ""
-                _emit(f"[x] Host: {host_label}  Status: failed{err}")
+                _emit(_colorize(f"[x] Host: {host_label}  Status: failed{err}", _C_RED, self.use_color))
                 if result.error_message:
-                    _emit(f"[x] Host: {host_label}  Error: {result.error_message}")
-            _emit(f"[x] Host: {host_label}  Scanned in: {result.scan_time:.1f}s")
+                    _emit(_colorize(f"[x] Host: {host_label}  Error: {result.error_message}", _C_RED, self.use_color))
+            _emit(_colorize(f"[x] Host: {host_label}  Scanned in: {result.scan_time:.1f}s", _C_DIM, self.use_color))
 
             # If host-level filtering is active: flush buffer for matching hosts, discard the rest
             if use_buffer:
@@ -1745,8 +1792,8 @@ class SSHEnhancedScanner:
                                 (not self.filter_hosts or 'error' in self.filter_hosts))
                         if show:
                             with self.lock:
-                                print(f"[x] Host: {host}:{port}  Status: error (processing)")
-                                print(f"[x] Host: {host}:{port}  Error: {e}")
+                                print(_colorize(f"[x] Host: {host}:{port}  Status: error (processing)", _C_RED, self.use_color))
+                                print(_colorize(f"[x] Host: {host}:{port}  Error: {e}", _C_RED, self.use_color))
             
             except Exception as e:
                 logger.error(f"Error in batch scan executor loop: {e}", exc_info=True)
@@ -1864,68 +1911,112 @@ def load_config_file(config_path: str) -> Dict:
 
 def print_summary_report(results: List[SSHHostResult], scanner: SSHEnhancedScanner, total_time: float):
     """Print comprehensive summary report"""
+    c = scanner.use_color
+    sep = "=" * 80
+
+    def _label(r: SSHHostResult) -> str:
+        """Return display label: hostname:port when show_hostnames is on and name is known."""
+        if scanner.show_hostnames and r.hostname:
+            return f"{r.hostname}:{r.port}"
+        return f"{r.host}:{r.port}"
+
+    def _section(title: str, title_code: str = _C_BOLD) -> None:
+        print(f"\n{_colorize(sep, _C_BOLD, c)}")
+        print(_colorize(title, title_code, c))
+        print(_colorize(sep, _C_BOLD, c))
+
     successful_scans = sum(1 for r in results if r.status == "success")
     failed_scans = len(results) - successful_scans
     avg_score = sum(r.security_score for r in results if r.status == "success") / max(successful_scans, 1)
-    
-    print(f"\n" + "=" * 80)
-    print("SUMMARY")
-    print("=" * 80)
-    print(f"Total hosts scanned: {len(results)}")
-    print(f"Successful scans: {successful_scans}")
-    print(f"Failed scans: {failed_scans}")
-    
+
+    _section("SUMMARY")
+    print(f"Total hosts scanned: {_colorize(str(len(results)), _C_BOLD, c)}")
+    print(f"Successful scans:    {_colorize(str(successful_scans), _C_GREEN if successful_scans else _C_DIM, c)}")
+    print(f"Failed scans:        {_colorize(str(failed_scans), _C_RED if failed_scans else _C_DIM, c)}")
+
     if failed_scans > 0:
         # Break down failures by type
         error_types = {}
         for r in results:
             if r.status != "success" and r.error_type:
                 error_types[r.error_type] = error_types.get(r.error_type, 0) + 1
-        
-        print("\nFailure breakdown:")
+
+        print(_colorize("\nFailure breakdown:", _C_RED, c))
         for error_type, count in sorted(error_types.items()):
-            print(f"  {error_type}: {count}")
-    
-    print(f"\nAverage security score: {avg_score:.1f}/100")
-    print(f"Total scan time: {total_time:.1f}s")
-    print(f"Average time per host: {total_time/len(results):.1f}s")
-    
+            print(_colorize(f"  {error_type}: {count}", _C_RED, c))
+
+        print(_colorize("\nFailed hosts:", _C_RED, c))
+        for r in results:
+            if r.status != 'success':
+                err = f"  ({r.error_type})" if r.error_type else ""
+                print(_colorize(f"  {_label(r)}{err}", _C_RED, c))
+
+    # Score: green ≥80, yellow ≥50, red <50
+    score_color = _C_GREEN if avg_score >= 80 else (_C_YELLOW if avg_score >= 50 else _C_RED)
+    print(f"\nAverage security score: {_colorize(f'{avg_score:.1f}/100', score_color, c)}")
+    print(f"Total scan time:        {total_time:.1f}s")
+    print(f"Average time per host:  {total_time / len(results):.1f}s")
+
     # Compliance summary
     if scanner.compliance_framework and successful_scans > 0:
-        compliant_hosts = sum(1 for r in results 
-                            if r.compliance_status and r.compliance_status.get('overall_compliant', False))
+        compliant_hosts = sum(1 for r in results
+                              if r.compliance_status and r.compliance_status.get('overall_compliant', False))
         compliance_rate = (compliant_hosts / successful_scans) * 100
+        cpl_color = _C_GREEN if compliance_rate == 100 else (_C_YELLOW if compliance_rate > 0 else _C_RED)
         print(f"\nCompliance ({scanner.compliance_framework}):")
-        print(f"  Compliant hosts: {compliant_hosts}/{successful_scans} ({compliance_rate:.1f}%)")
-    
+        print(f"  Compliant hosts: {_colorize(f'{compliant_hosts}/{successful_scans} ({compliance_rate:.1f}%)', cpl_color, c)}")
+
+        failed_compliance = [r for r in results
+                             if r.status == 'success' and r.compliance_status
+                             and not r.compliance_status.get('overall_compliant', True)]
+        if failed_compliance:
+            print(_colorize("  Non-compliant hosts:", _C_RED, c))
+            for r in failed_compliance:
+                print(_colorize(f"    {_label(r)}", _C_RED, c))
+
     # NSA backdoor analysis summary
     if scanner.show_nsa_warnings and any(r.nsa_backdoor_analysis for r in results):
-        print(f"\n" + "=" * 80)
-        print("NSA BACKDOOR RISK ANALYSIS")
-        print("=" * 80)
-        
+        _section("NSA BACKDOOR RISK ANALYSIS", '\033[1;31m')  # bold red
+
         total_high_risk = 0
         total_medium_risk = 0
         affected_hosts = 0
-        
+
         for result in results:
             if result.nsa_backdoor_analysis and 'enabled' in result.nsa_backdoor_analysis:
                 if result.nsa_backdoor_analysis['enabled']:
                     high_risk_count = len(result.nsa_backdoor_analysis.get('high_risk_algorithms', []))
                     medium_risk_count = len(result.nsa_backdoor_analysis.get('medium_risk_algorithms', []))
-                    
+
                     if high_risk_count > 0 or medium_risk_count > 0:
                         affected_hosts += 1
                         total_high_risk += high_risk_count
                         total_medium_risk += medium_risk_count
-        
-        print(f"Hosts with NSA backdoor risks: {affected_hosts}/{successful_scans}")
-        print(f"Total high-risk algorithms: {total_high_risk}")
-        print(f"Total medium-risk algorithms: {total_medium_risk}")
-        
+
+        aff_color = _C_RED if affected_hosts > 0 else _C_GREEN
+        print(f"Hosts with NSA backdoor risks: {_colorize(f'{affected_hosts}/{successful_scans}', aff_color, c)}")
+        print(f"Total high-risk algorithms:    {_colorize(str(total_high_risk), _C_RED if total_high_risk else _C_DIM, c)}")
+        print(f"Total medium-risk algorithms:  {_colorize(str(total_medium_risk), _C_YELLOW if total_medium_risk else _C_DIM, c)}")
+
+        if affected_hosts > 0:
+            print(_colorize("\nAffected hosts:", '\033[1;31m', c))
+            for r in results:
+                if not (r.nsa_backdoor_analysis and r.nsa_backdoor_analysis.get('enabled')):
+                    continue
+                h = len(r.nsa_backdoor_analysis.get('high_risk_algorithms', []))
+                m = len(r.nsa_backdoor_analysis.get('medium_risk_algorithms', []))
+                if h == 0 and m == 0:
+                    continue
+                parts = []
+                if h:
+                    parts.append(_colorize(f"{h} high", _C_RED, c))
+                if m:
+                    parts.append(_colorize(f"{m} medium", _C_YELLOW, c))
+                print(f"  {_colorize(_label(r), _C_BOLD, c)}  {', '.join(parts)}")
+
         # Show top risky algorithms
         if total_high_risk > 0:
-            print(f"\nMost common HIGH RISK algorithms:")
+            print(_colorize(f"\nMost common HIGH RISK algorithms:", '\033[1;31m', c))
             risk_counter = {}
             for result in results:
                 if result.nsa_backdoor_analysis and 'high_risk_algorithms' in result.nsa_backdoor_analysis:
@@ -1934,21 +2025,19 @@ def print_summary_report(results: List[SSHHostResult], scanner: SSHEnhancedScann
                         risk_counter[algo_name] = risk_counter.get(algo_name, 0) + 1
 
             for algo, count in sorted(risk_counter.items(), key=lambda x: x[1], reverse=True)[:5]:
-                print(f"  - {algo}: found on {count} hosts")
+                print(_colorize(f"  - {algo}: found on {count} hosts", _C_RED, c))
 
     # Scanner configuration & DNS cache stats
-    print(f"\n" + "=" * 80)
-    print("SCANNER STATISTICS")
-    print("=" * 80)
-    print(f"Threads:          {scanner.max_workers}")
-    print(f"Timeout:          {scanner.timeout}s")
-    print(f"Retry attempts:   {scanner.retry_attempts}")
-    print(f"NSA warnings:     {'enabled' if scanner.show_nsa_warnings else 'disabled'}")
+    _section("SCANNER STATISTICS")
+    print(f"Threads:          {_colorize(str(scanner.max_workers), _C_CYAN, c)}")
+    print(f"Timeout:          {_colorize(f'{scanner.timeout}s', _C_CYAN, c)}")
+    print(f"Retry attempts:   {_colorize(str(scanner.retry_attempts), _C_CYAN, c)}")
+    print(f"NSA warnings:     {_colorize('enabled' if scanner.show_nsa_warnings else 'disabled', _C_GREEN if scanner.show_nsa_warnings else _C_DIM, c)}")
 
     dns = scanner.dns_cache.get_stats()
     print(f"\nDNS Cache:")
-    print(f"  Hit rate:       {dns['hit_rate']}")
-    print(f"  Lookups:        {dns['total_lookups']}  (hits: {dns['hits']}, misses: {dns['misses']})")
+    print(f"  Hit rate:       {_colorize(dns['hit_rate'], _C_CYAN, c)}")
+    print(f"  Lookups:        {_colorize(str(dns['total_lookups']), _C_CYAN, c)}  (hits: {dns['hits']}, misses: {dns['misses']})")
 
 
 class Spinner:
@@ -2085,6 +2174,10 @@ Examples:
                         help='Verbose output')
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug output')
+    parser.add_argument('--no-color', action='store_true',
+                        help='Disable ANSI color output')
+    parser.add_argument('--show-hostnames', '-n', action='store_true',
+                        help='Show original DNS names in output instead of resolved IPs')
 
     args = parser.parse_args()
 
@@ -2183,6 +2276,10 @@ Examples:
         with SSHEnhancedScanner(config) as scanner:
             scanner.show_nsa_warnings = not args.no_nsa_warnings
             scanner.summary_only = args.summary_only
+            scanner.show_hostnames = args.show_hostnames
+            # Disable color if explicitly requested, or when piping format output to stdout
+            if args.no_color or (args.format and not args.output):
+                scanner.use_color = False
 
             if args.summary_only:
                 scanner.spinner = Spinner('Scanning')
@@ -2215,7 +2312,8 @@ Examples:
                         alg_str += f' +{len(explicit_algorithms) - 3} more'
                     parts.append(f"explicit: {alg_str}")
                 noun = 'host' if host_count == 1 else 'hosts'
-                print(f"Scanning {host_count} {noun}  {'  '.join(parts)}\n")
+                header = f"Scanning {host_count} {noun}  {'  '.join(parts)}"
+                print(_colorize(header, _C_BOLD, scanner.use_color) + "\n")
 
             # --local: scan the local SSH server (127.0.0.1)
             if args.local:

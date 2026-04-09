@@ -3,7 +3,7 @@
 A single-file Python tool for auditing SSH algorithm configuration across one or many hosts.
 Wraps the system `ssh` binary to probe each algorithm individually — no paramiko, no authentication.
 
-**Version:** 3.2.0 | **Author:** Robert Tulke
+**Version:** 3.3.0 | **Author:** Robert Tulke
 
 ---
 
@@ -572,3 +572,153 @@ Use bracket notation: `--host "[2001:db8::1]:22"` or put `[2001:db8::1]:22` in y
 **All algorithms show as not supported on a specific host**
 The host may be blocking the connection entirely (firewall, wrong port).
 Check the SSH banner: if it's empty, the host is not reachable on that port.
+
+---
+
+## Hardening Guide
+
+Once sshscan reports weak or NSA-flagged algorithms, the next step is removing them from
+the server configuration and optionally restricting what the SSH client will accept.
+The configs below map directly to sshscan's compliance frameworks.
+
+> **Before applying any server config:** ensure you have out-of-band console access
+> (KVM, cloud console, serial port). A broken sshd config that prevents the daemon from
+> starting will lock you out if SSH is your only access path. Always run `sudo sshd -t`
+> before reloading.
+
+---
+
+### OpenSSH Server (`/etc/ssh/sshd_config`)
+
+#### Balanced — no weak algorithms, NIST curves allowed
+
+Removes all weak and deprecated algorithms. NIST P-curves (`ecdh-sha2-nistp*`,
+`ecdsa-sha2-nistp*`) are kept for broader client compatibility.
+Matches the **NIST**, **BSI\_TR\_02102**, and **ANSSI** compliance frameworks.
+
+```ini
+# /etc/ssh/sshd_config
+
+# Modern AEAD ciphers only — no CBC, no arcfour, no 3DES
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
+
+# ETM MACs preferred; SHA-2 only — no MD5, no SHA-1, no 64-bit UMAC
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-512,hmac-sha2-256,umac-128@openssh.com
+
+# Modern key exchange — DH group 14+ (SHA-2), Curve25519, NIST ECDH
+KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512,diffie-hellman-group14-sha256,diffie-hellman-group-exchange-sha256,ecdh-sha2-nistp521,ecdh-sha2-nistp384,ecdh-sha2-nistp256
+
+# Host key types to advertise — Ed25519 and RSA-SHA2; no DSA, no legacy RSA/SHA-1
+HostKeyAlgorithms ssh-ed25519,ssh-ed25519-cert-v01@openssh.com,rsa-sha2-512,rsa-sha2-256,rsa-sha2-512-cert-v01@openssh.com,rsa-sha2-256-cert-v01@openssh.com
+```
+
+#### Strict — no NIST curves (anti-surveillance / PRIVACY\_FOCUSED)
+
+Also removes NIST P-curves. Only Curve25519 and ChaCha20/AES-GCM remain.
+Requires OpenSSH 7.x+ on the client side.
+Matches the **PRIVACY\_FOCUSED** compliance framework.
+
+```ini
+# /etc/ssh/sshd_config
+
+# ChaCha20 and AES-GCM only — no NIST-derived constructs
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com
+
+# ETM MACs only
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com
+
+# Curve25519 only — no NIST P-curves
+# sntrup761x25519-sha512@openssh.com adds post-quantum protection (requires OpenSSH 8.5+)
+KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
+
+# Ed25519 only — no RSA, no ECDSA
+HostKeyAlgorithms ssh-ed25519,ssh-ed25519-cert-v01@openssh.com
+```
+
+#### Apply and verify
+
+```bash
+# 1. Test the config — catches syntax errors and unsupported algorithm names
+sudo sshd -t
+
+# 2. Reload sshd without dropping existing sessions
+sudo systemctl reload sshd
+# or on older init systems:
+sudo service ssh reload
+
+# 3. Confirm the daemon is still running
+sudo systemctl status sshd
+```
+
+#### Generate a missing Ed25519 host key
+
+The strict config requires an Ed25519 host key. Generate one if it does not exist yet:
+
+```bash
+sudo ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key -N ""
+```
+
+Then make sure `sshd_config` includes the key:
+
+```ini
+HostKey /etc/ssh/ssh_host_ed25519_key
+```
+
+---
+
+### OpenSSH Client (`~/.ssh/config`)
+
+Client restrictions apply to all outgoing connections from your machine.
+Replace `Host *` with a specific hostname to restrict only one target.
+
+#### Balanced — no weak algorithms, NIST curves allowed
+
+```
+# ~/.ssh/config
+
+Host *
+    Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
+    MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-512,hmac-sha2-256,umac-128@openssh.com
+    KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512,diffie-hellman-group14-sha256,diffie-hellman-group-exchange-sha256,ecdh-sha2-nistp521,ecdh-sha2-nistp384,ecdh-sha2-nistp256
+    HostKeyAlgorithms ssh-ed25519,ssh-ed25519-cert-v01@openssh.com,rsa-sha2-512,rsa-sha2-256,rsa-sha2-512-cert-v01@openssh.com,rsa-sha2-256-cert-v01@openssh.com
+```
+
+#### Strict — no NIST curves
+
+```
+# ~/.ssh/config
+
+Host *
+    Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com
+    MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com
+    KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
+    HostKeyAlgorithms ssh-ed25519,ssh-ed25519-cert-v01@openssh.com
+```
+
+A strict client config will refuse to connect to servers that only offer NIST curves or
+legacy host keys. Use a per-host override to allow exceptions:
+
+```
+# Allow legacy algorithms only for this specific host
+Host legacy.example.com
+    KexAlgorithms +ecdh-sha2-nistp256
+    HostKeyAlgorithms +ecdsa-sha2-nistp256,rsa-sha2-256
+```
+
+---
+
+### Verify with sshscan
+
+After applying server changes, re-scan to confirm the result:
+
+```bash
+# Check the local server — should show no [!] lines
+python3 sshscan.py --local --filter flagged
+
+# Full compliance check against specific framework
+python3 sshscan.py --local --compliance PRIVACY_FOCUSED --summary
+
+# Remote host after hardening
+python3 sshscan.py --host server.example.com --filter weak,nsa
+python3 sshscan.py --host server.example.com --compliance BSI_TR_02102
+```

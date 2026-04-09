@@ -4,7 +4,32 @@ All notable changes to SSH Algorithm Security Scanner are documented here.
 
 ---
 
-## [3.2.0] — Current
+## [3.3.0] — Current
+
+### New Features
+
+- **ANSI color output** — live scan lines are color-coded by severity; summary sections use color for headers, counts, and scores
+  - `[x]` supported → green / `[-]` unsupported → dim / `[!]` weak → yellow / `[!]` NSA high → red / `[!]` NSA medium → yellow
+  - Banner line → cyan; scan header → bold; compliance PASS → green / FAIL → red; security score colored by range
+  - Summary: section headers bold, counts and stats colored, NSA section header bold red
+  - Auto-disabled when stdout is not a TTY (piped/redirected) or when `--format` exports to stdout
+- **`--no-color`** — force-disable ANSI color output
+- **`--show-hostnames` / `-n`** — display original DNS names in output instead of resolved IPs; original name preserved through all input paths (stdin, `--host`, `--file` all formats); stored as `SSHHostResult.hostname` and included in exports
+- **Summary host lists** — the summary report now lists affected hosts by name in addition to counts:
+  - Failed scans: host + error type
+  - Compliance failures: non-compliant host list under the percentage line
+  - NSA risks: affected hosts with per-host high/medium risk counts
+
+### Documentation
+
+- **Hardening Guide** — new README section with ready-to-paste `sshd_config` and `~/.ssh/config` snippets for two security levels:
+  - *Balanced* (no weak algorithms, NIST curves kept) — maps to NIST / BSI\_TR\_02102 / ANSSI
+  - *Strict* (no NIST curves, Curve25519/Ed25519 only) — maps to PRIVACY\_FOCUSED
+  - Includes apply/verify workflow, Ed25519 host key generation, and per-host client override example
+
+---
+
+## [3.2.0]
 
 ### New Features
 
