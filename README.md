@@ -27,7 +27,7 @@ Wraps the system `ssh` binary to probe each algorithm individually — no parami
 - **No configuration push** — read-only analysis only
 - **No CVE integration** — does not map findings to CVE IDs
 - **No daemon / continuous monitoring** — single-run tool
-- **No Windows** — requires OpenSSH `ssh` in PATH (`/usr/bin/ssh` or equivalent)
+- **Windows**: works fine under WSL (Windows Subsystem for Linux); native Windows requires the OpenSSH client (`winget install Microsoft.OpenSSH.Beta` or via Optional Features) — the tool should run but is untested, and `/etc/sshscan/` auto-discovery does not apply
 - **No paramiko** — depends on the system SSH binary; behavior reflects the installed SSH client version
 - **No scan resume** — interrupted scans cannot be continued
 
@@ -61,6 +61,22 @@ pip install pyyaml toml
 chmod +x sshscan.py
 ./sshscan.py --version
 ```
+
+### Windows (WSL or native OpenSSH)
+
+**WSL** — open a WSL terminal and follow the Linux instructions above.
+
+**Native Windows** — install the OpenSSH client first, then:
+```powershell
+winget install Microsoft.OpenSSH.Beta   # or via Settings > Optional Features
+git clone https://github.com/rtulke/sshscan.git
+cd sshscan
+python -m venv .venv
+.venv\Scripts\activate.bat
+pip install -r requirements.txt
+python sshscan.py --version
+```
+Note: `/etc/sshscan/` config auto-discovery does not apply on Windows; use `--config` or `%USERPROFILE%\.sshscan\config.toml`.
 
 ### Virtual environment (recommended)
 

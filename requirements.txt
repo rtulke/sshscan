@@ -1,38 +1,4 @@
-# SSH Algorithm Security Scanner - Professional Enterprise Edition
-# Required Dependencies
+# SSH Algorithm Security Scanner — Dependencies
 
-# Core dependencies for enhanced features
-PyYAML>=6.0.1              # YAML file format support for host lists
-toml>=0.10.2               # TOML configuration file support
-
-# Optional dependencies for extended functionality
-# Uncomment if you need advanced SSH operations
-# paramiko>=3.4.0          # Advanced SSH client library
-# cryptography>=41.0.0     # Cryptographic operations and analysis
-
-# Optional dependencies for enhanced reporting
-# Uncomment for advanced reporting features
-# jinja2>=3.1.0           # Template engine for HTML reports
-# matplotlib>=3.7.0       # Plotting and visualization
-# pandas>=2.0.0           # Data analysis and manipulation
-
-# Development and testing dependencies
-# Uncomment for development work
-# pytest>=7.4.0           # Testing framework
-# pytest-cov>=4.1.0       # Coverage reporting
-# black>=23.7.0           # Code formatting
-# flake8>=6.0.0           # Code linting
-# mypy>=1.5.0             # Static type checking
-# pre-commit>=3.3.0       # Git hooks for code quality
-# bandit>=1.7.0           # Security linter
-
-# Documentation dependencies
-# Uncomment for documentation generation
-# sphinx>=7.1.0           # Documentation generator
-# sphinx-rtd-theme>=1.3.0 # ReadTheDocs theme
-
-# Monitoring and alerting dependencies  
-# Uncomment for production monitoring
-# requests>=2.31.0        # HTTP requests for webhooks
-# slack-sdk>=3.21.0       # Slack notifications
-# pydantic>=2.1.0         # Data validation
+PyYAML>=6.0.1    # YAML host file support (.yaml / .yml)
+toml>=0.10.2     # TOML configuration file support (config.toml)
