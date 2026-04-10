@@ -1,0 +1,121 @@
+# /etc/ssh/sshd_config — BALANCED HARDENING PROFILE
+#
+# Philosophy: strong hardening with practical compatibility. No weak ciphers,
+# no password authentication, no root login — but includes NIST curves as
+# fallback for environments with mixed clients (Windows, older OpenSSH,
+# network devices, CI/CD tooling that cannot be updated).
+#
+# Suitable for: most production servers, mixed-client environments, teams
+# transitioning away from legacy configurations.
+#
+# Before applying:
+#   1. Confirm key-based login works in a second terminal.
+#   2. Remove DSA host key (weak; no longer used by any modern client):
+#        sudo rm -f /etc/ssh/ssh_host_dsa_key*
+#   3. Filter DH moduli:
+#        sudo awk '$5 >= 3071' /etc/ssh/moduli | sudo tee /etc/ssh/moduli.safe \
+#          && sudo mv /etc/ssh/moduli.safe /etc/ssh/moduli
+#   4. Set AllowUsers to actual account names.
+#   5. Update the Subsystem sftp path for your distribution (see below).
+#   6. Validate: sudo sshd -t
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Network ───────────────────────────────────────────────────────────────────
+Port          22
+AddressFamily any
+ListenAddress 0.0.0.0
+ListenAddress ::
+
+# ── Host keys ─────────────────────────────────────────────────────────────────
+# Ed25519 is preferred. ECDSA kept as fallback for clients that don't support Ed25519.
+# RSA intentionally omitted — Ed25519 is supported on any client from 2014 onward.
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_ecdsa_key    # remove if all clients support Ed25519
+
+# ── Cryptographic algorithms ──────────────────────────────────────────────────
+# Ciphers: AEAD only — no CBC, no RC4, no 3DES
+Ciphers           chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
+
+# MACs: ETM (encrypt-then-MAC) only — no legacy non-ETM variants
+MACs              hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+
+# KEX: PQC hybrid + Curve25519 preferred; NIST curves as fallback for compatibility
+# Remove the ecdh-sha2-nist* entries once all clients support Curve25519
+KexAlgorithms     mlkem768x25519-sha256,sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp521,ecdh-sha2-nistp384,ecdh-sha2-nistp256
+
+# Host key algorithms: Ed25519 preferred; ECDSA as fallback
+# Remove ecdsa-sha2-* once all clients support Ed25519
+HostKeyAlgorithms ssh-ed25519,sk-ssh-ed25519@openssh.com,ecdsa-sha2-nistp521,ecdsa-sha2-nistp384,ecdsa-sha2-nistp256
+
+# ── Authentication ────────────────────────────────────────────────────────────
+PermitRootLogin              no
+AuthenticationMethods        publickey
+PubkeyAuthentication         yes
+PasswordAuthentication       no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords         no
+GSSAPIAuthentication         no
+IgnoreRhosts                 yes
+HostbasedAuthentication      no
+UsePAM                       yes
+
+# ── Access control ────────────────────────────────────────────────────────────
+AllowUsers         REPLACE_ME          # space-separated: alice bob deploy
+LoginGraceTime     30
+MaxAuthTries       3
+MaxSessions        5
+MaxStartups        10:30:60
+
+# ── Session management ────────────────────────────────────────────────────────
+ClientAliveInterval      300           # keepalive every 5 min
+ClientAliveCountMax      2             # disconnect after 2 missed → 10 min max idle
+RekeyLimit               1G 1h
+ChannelTimeout           session:600   # close idle channels after 10 min (OpenSSH >= 9.2)
+UnusedConnectionTimeout  300           # drop dead connections after 5 min (OpenSSH >= 9.2)
+
+# ── Feature restriction ───────────────────────────────────────────────────────
+DisableForwarding     yes              # disable all forwarding unless re-enabled per user
+PermitTunnel          no
+PermitUserEnvironment no
+StrictModes           yes
+Compression           no
+TCPKeepAlive          no
+
+# Re-enable forwarding selectively where required:
+# Match User deployuser
+#     AllowTcpForwarding yes
+#     DisableForwarding  no
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+LogLevel       VERBOSE
+SyslogFacility AUTH
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+Banner       /etc/issue.net
+PrintMotd    no
+PrintLastLog yes
+AcceptEnv    LANG LC_*                 # pass locale; remove if not needed
+
+# SFTP subsystem — uncomment the correct path for your distribution:
+#   Debian/Ubuntu : /usr/lib/openssh/sftp-server
+#   RHEL/Fedora   : /usr/libexec/openssh/sftp-server
+#   macOS         : /usr/libexec/sftp-server
+Subsystem sftp /usr/lib/openssh/sftp-server
+
+# SFTP-only users: chroot + restricted shell
+# Match Group sftponly
+#     ChrootDirectory    /srv/sftp/%u
+#     ForceCommand       internal-sftp -l INFO
+#     AllowTcpForwarding no
+#     X11Forwarding      no
+#     DisableForwarding  no
+
+# ── Migration path ────────────────────────────────────────────────────────────
+# When you are ready to move to the strict profile:
+#
+#   1. Remove ecdh-sha2-nist* from KexAlgorithms
+#   2. Remove ecdsa-sha2-* from HostKeyAlgorithms
+#   3. Remove HostKey /etc/ssh/ssh_host_ecdsa_key
+#   4. Delete /etc/ssh/ssh_host_ecdsa_key*
+#   5. Replace this file with sshd_config.strict
+#   6. sudo sshd -t && sudo systemctl restart sshd

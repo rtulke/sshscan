@@ -1,0 +1,107 @@
+# /etc/ssh/sshd_config — STRICT HARDENING PROFILE
+#
+# Philosophy: zero tolerance. No NIST curves, no RSA, no forwarding, no SFTP.
+# Only Curve25519/Ed25519 and post-quantum ML-KEM. Suitable for public-facing
+# servers, bastion hosts, or any system where security outweighs convenience.
+#
+# Requirements:
+#   OpenSSH >= 8.5   for sntrup761x25519-sha512 (PQC fallback)
+#   OpenSSH >= 9.2   for ChannelTimeout / UnusedConnectionTimeout
+#   OpenSSH >= 9.9   for mlkem768x25519-sha256 (IETF ML-KEM / FIPS 203)
+#
+# Before applying:
+#   1. Confirm key-based login works in a second terminal — keep it open.
+#   2. Remove weak host keys:
+#        sudo rm -f /etc/ssh/ssh_host_rsa_key*
+#        sudo rm -f /etc/ssh/ssh_host_dsa_key*
+#        sudo rm -f /etc/ssh/ssh_host_ecdsa_key*
+#   3. Generate Ed25519 host key if not present:
+#        sudo ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key -N ""
+#   4. Filter weak DH moduli:
+#        sudo awk '$5 >= 3071' /etc/ssh/moduli | sudo tee /etc/ssh/moduli.safe \
+#          && sudo mv /etc/ssh/moduli.safe /etc/ssh/moduli
+#   5. Set AllowUsers to actual account names.
+#   6. Create /etc/issue.net with a warning banner.
+#   7. Validate: sudo sshd -t
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Network ───────────────────────────────────────────────────────────────────
+Port          22
+AddressFamily any
+ListenAddress 0.0.0.0
+ListenAddress ::
+
+# ── Host key (Ed25519 only) ───────────────────────────────────────────────────
+HostKey /etc/ssh/ssh_host_ed25519_key
+
+# ── Cryptographic algorithms ──────────────────────────────────────────────────
+# Ciphers: ChaCha20-Poly1305 only — fastest AEAD, no hardware acceleration needed
+Ciphers           chacha20-poly1305@openssh.com,aes256-gcm@openssh.com
+
+# MACs: SHA-512 ETM only
+MACs              hmac-sha2-512-etm@openssh.com
+
+# KEX: Post-quantum hybrid first, Curve25519 as fallback; no NIST P-curves
+# mlkem768x25519-sha256 requires OpenSSH 9.9 — remove if running an older version
+KexAlgorithms     mlkem768x25519-sha256,sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
+
+# Host key algorithm: Ed25519 only (sk- variant for FIDO2-backed host keys)
+HostKeyAlgorithms ssh-ed25519,sk-ssh-ed25519@openssh.com
+
+# ── Authentication ────────────────────────────────────────────────────────────
+PermitRootLogin              no
+AuthenticationMethods        publickey
+PubkeyAuthentication         yes
+PasswordAuthentication       no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords         no
+GSSAPIAuthentication         no
+IgnoreRhosts                 yes
+HostbasedAuthentication      no
+UsePAM                       yes   # keep yes: required for pam_systemd/pam_limits/pam_env
+
+# Enforce PIN/biometric for FIDO2/sk-* keys (OpenSSH >= 8.9)
+# Enable if all clients use FIDO2 hardware tokens with verify-required
+# PubkeyAuthOptions verify-required
+
+# ── Access control ────────────────────────────────────────────────────────────
+AllowUsers         REPLACE_ME        # space-separated: alice bob  — or use AllowGroups sshusers
+LoginGraceTime     20
+MaxAuthTries       2
+MaxSessions        2
+MaxStartups        5:50:10           # aggressive: soft limit at 5, hard at 10
+
+# ── Session management ────────────────────────────────────────────────────────
+ClientAliveInterval      120         # keepalive every 2 min
+ClientAliveCountMax      2           # disconnect after 2 missed → 4 min max idle
+RekeyLimit               512M 30m   # re-key aggressively
+ChannelTimeout           session:180 # close idle channels after 3 min (OpenSSH >= 9.2)
+UnusedConnectionTimeout  120         # drop idle connections after 2 min (OpenSSH >= 9.2)
+
+# ── Feature restriction ───────────────────────────────────────────────────────
+DisableForwarding     yes            # X11, TCP, agent, UNIX-socket (OpenSSH >= 7.8)
+PermitTunnel          no             # TUN/TAP tunneling
+PermitUserEnvironment no             # block env injection via authorized_keys
+StrictModes           yes
+Compression           no             # CRIME-class attacks on compressed ciphertext
+TCPKeepAlive          no             # TCP keepalives are spoofable; app-level only
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+LogLevel       VERBOSE               # logs key fingerprints and negotiated algorithms
+SyslogFacility AUTH
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+Banner       /etc/issue.net          # legal deterrent — create this file
+PrintMotd    no
+PrintLastLog yes                     # shows last login; helps detect unauthorized access
+
+# No AcceptEnv — block all client environment variable injection
+
+# No SFTP subsystem. If SFTP is needed, add a restricted Match block:
+# Match Group sftponly
+#     AuthorizedKeysFile   /etc/ssh/sftp_authorized_keys/%u
+#     ChrootDirectory      /srv/sftp/%u
+#     ForceCommand         internal-sftp -l INFO
+#     AllowTcpForwarding   no
+#     X11Forwarding        no
+#     DisableForwarding    no   # must re-enable to allow ForceCommand override

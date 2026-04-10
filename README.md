@@ -12,6 +12,7 @@ Wraps the system `ssh` binary to probe each algorithm individually — no parami
 - [What it can do](#what-it-can-do)
 - [What it cannot do](#what-it-cannot-do)
 - [Requirements](#requirements)
+- [Supported OS](#supported-os)
 - [Installation](#installation)
   - [Quick (system Python)](#quick-system-python)
   - [Windows (WSL or native OpenSSH)](#windows-wsl-or-native-openssh)
@@ -114,6 +115,49 @@ pip install -r requirements.txt
 # or individually:
 pip install pyyaml
 ```
+
+---
+
+## Supported OS
+
+### Scanner host (where you run sshscan.py)
+
+| Platform | Status | Notes |
+|---|---|---|
+| Ubuntu 20.04 / 22.04 / 24.04 | Supported | Primary development platform |
+| Debian 11 (Bullseye) / 12 (Bookworm) | Supported | |
+| Debian-based distros | Supported | Linux Mint, Raspberry Pi OS, Pop!\_OS, Kali Linux, Parrot OS, MX Linux, Zorin OS and any other Debian/Ubuntu derivative — works as long as Python 3.8+ and `openssh-client` are installed |
+| RHEL / Rocky Linux / AlmaLinux 8 | Supported | |
+| RHEL / Rocky Linux / AlmaLinux 9 | Supported | |
+| Fedora 38+ | Supported | |
+| Arch Linux | Supported | |
+| macOS 12 Monterey / 13 Ventura / 14 Sonoma / 15 Sequoia | Supported | Uses system OpenSSH; no extra dependencies |
+| Windows — WSL (Ubuntu / Debian) | Supported | Run inside a WSL instance; full feature parity |
+| Windows 10/11 — native OpenSSH | Untested | Requires OpenSSH client via `winget install Microsoft.OpenSSH.Beta` or Optional Features; `/etc/sshscan/` auto-discovery does not apply |
+| FreeBSD / OpenBSD / NetBSD | Untested | Should work with Python 3.8+ and OpenSSH client; not regularly tested |
+| Alpine Linux | Untested | Requires `openssh-client` package; the BusyBox `ssh` stub is not sufficient |
+
+> **OpenSSH client version on the scanner host:**
+> - Minimum: OpenSSH 7.x — covers all algorithms except the post-quantum KEX entries
+> - Full feature support: OpenSSH 9.9+ — required to probe `mlkem768x25519-sha256` (ML-KEM)
+> - OpenSSH 8.5–9.8 — can probe `sntrup761x25519-sha512@openssh.com` (NTRU Prime hybrid)
+>
+> The scanner detects which algorithms the local SSH client supports and skips those it cannot
+> probe, so operation is graceful on older OpenSSH versions.
+
+### Scan targets (what can be scanned)
+
+Any SSH server is a valid target regardless of OS or hardware:
+
+| Target type | Examples |
+|---|---|
+| Linux servers | Any distribution running OpenSSH or Dropbear |
+| macOS | Built-in OpenSSH server |
+| *BSD | OpenBSD, FreeBSD, NetBSD |
+| Windows | Windows OpenSSH Server (`sshd` via Optional Features) |
+| Network devices | Cisco IOS/IOS-XE/NX-OS, Juniper JunOS, Palo Alto PAN-OS, F5 BIG-IP |
+| Embedded / IoT | Routers, NAS devices, industrial controllers with SSH |
+| Cloud instances | AWS EC2, GCP Compute, Azure VM — any SSH-accessible endpoint |
 
 ---
 
