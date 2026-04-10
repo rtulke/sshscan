@@ -21,6 +21,7 @@ it only observes what the server is willing to negotiate.
 - [Requirements](#requirements)
 - [Supported OS](#supported-os)
 - [Installation](#installation)
+  - [macOS (Homebrew)](#macos-homebrew)
   - [Quick (system Python)](#quick-system-python)
   - [Windows (WSL or native OpenSSH)](#windows-wsl-or-native-openssh)
   - [Virtual environment (recommended)](#virtual-environment-recommended)
@@ -169,6 +170,37 @@ Any SSH server is a valid target regardless of OS or hardware:
 ---
 
 ## Installation
+
+### macOS (Homebrew)
+
+The recommended installation method on macOS. Homebrew manages Python, PyYAML,
+and future upgrades automatically.
+
+```bash
+brew tap rtulke/sshscan
+brew install sshscan
+```
+
+Verify:
+
+```bash
+sshscan --version
+```
+
+Upgrade when a new version is released:
+
+```bash
+brew upgrade sshscan
+```
+
+Uninstall:
+
+```bash
+brew uninstall sshscan
+brew untap rtulke/sshscan
+```
+
+> The Homebrew tap is at [https://github.com/rtulke/homebrew-sshscan](https://github.com/rtulke/homebrew-sshscan).
 
 ### Quick (system Python)
 
