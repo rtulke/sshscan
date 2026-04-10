@@ -121,7 +121,9 @@ with open('${SSHSCAN_DIR}/CHANGELOG.md', 'w') as f:
     f.write(content)
 PYEOF
 ok "CHANGELOG.md  (placeholder section added for ${NEW_VERSION})"
-warn "Remember to fill in the CHANGELOG entry before announcing the release."
+
+echo -e "\n  ${YELLOW}Opening CHANGELOG.md — fill in the [${NEW_VERSION}] section, save and quit to continue.${NC}"
+${EDITOR:-vi} "$SSHSCAN_DIR/CHANGELOG.md"
 
 # ── Step 2: Commit, tag, push ─────────────────────────────────────────────────
 step "2/5" "Committing, tagging, pushing sshscan"

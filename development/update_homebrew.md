@@ -48,16 +48,11 @@ git push origin main
 The script handles everything from here: version bump, commit, tag, push, SHA256,
 Homebrew formula update, and the tap commit/push.
 
-**3. Fill in the CHANGELOG**
+**3. Fill in the CHANGELOG (prompted by the script)**
 
-The script inserts a placeholder section for the new version. Edit it, then commit:
-
-```bash
-# edit CHANGELOG.md — fill in "## [3.6.1] — Current"
-git add CHANGELOG.md
-git commit -m "Update CHANGELOG for v3.6.1"
-git push origin main
-```
+After inserting the placeholder, the script opens `$EDITOR` (falls back to `vi`)
+so you can fill in the new version section immediately. Save and quit — the script
+commits the finished CHANGELOG together with the version bump and continues.
 
 ---
 
@@ -73,7 +68,6 @@ git push origin main
 
 ## After the release
 
-- Fill in the `CHANGELOG.md` entry for the new version and commit
 - Users can upgrade with `brew upgrade sshscan`
 
 ## Requirements
