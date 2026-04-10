@@ -78,6 +78,7 @@ it only observes what the server is willing to negotiate.
 - [Exit Codes](#exit-codes)
 - [Troubleshooting](#troubleshooting)
 - [Hardening Guide](#hardening-guide)
+  - [Full SSH Hardening Guide](hardening-examples/ssh_hardening_guide.md)
   - [OpenSSH Server (sshd_config)](#openssh-server-etcsshsshd_config)
   - [OpenSSH Client (~/.ssh/config)](#openssh-client-sshconfig)
   - [Verify with sshscan](#verify-with-sshscan)
@@ -895,6 +896,12 @@ Check the SSH banner: if it's empty, the host is not reachable on that port.
 ---
 
 ## Hardening Guide
+
+> For a comprehensive step-by-step guide covering firewall rules, 2FA, certificate
+> authorities, jump hosts, cloud environments, and incident response, see the
+> [SSH Hardening Guide](hardening-examples/ssh_hardening_guide.md).
+> Ready-to-use config profiles are also available in
+> [`hardening-examples/`](hardening-examples/).
 
 Once sshscan reports weak or NSA-flagged algorithms, the next step is removing them from
 the server configuration and optionally restricting what the SSH client will accept.
