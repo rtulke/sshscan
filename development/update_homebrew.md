@@ -22,6 +22,45 @@ chmod +x development/update_homebrew.sh
 The wizard automatically suggests the next patch version (e.g. `3.5.0` → `3.5.1`)
 and shows a confirmation prompt before doing anything.
 
+## Release workflow
+
+The script expects a clean working tree. Follow these three steps:
+
+**1. Commit all pending changes first**
+
+The script only stages `sshscan.py`, `README.md`, and `CHANGELOG.md`.
+Everything else (feature work, reorganisation, config changes) must be committed before running it:
+
+```bash
+git add .
+git commit -m "Your commit message"
+git push origin main
+```
+
+**2. Run the script**
+
+```bash
+./development/update_homebrew.sh 3.6.1
+# or without an argument to use the interactive wizard:
+./development/update_homebrew.sh
+```
+
+The script handles everything from here: version bump, commit, tag, push, SHA256,
+Homebrew formula update, and the tap commit/push.
+
+**3. Fill in the CHANGELOG**
+
+The script inserts a placeholder section for the new version. Edit it, then commit:
+
+```bash
+# edit CHANGELOG.md — fill in "## [3.6.1] — Current"
+git add CHANGELOG.md
+git commit -m "Update CHANGELOG for v3.6.1"
+git push origin main
+```
+
+---
+
 ## What happens
 
 | Step | Action |
