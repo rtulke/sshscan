@@ -1,7 +1,14 @@
 # SSH Algorithm Security Scanner
 
-A single-file Python tool for auditing SSH algorithm configuration across one or many hosts.
-Wraps the system `ssh` binary to probe each algorithm individually — no paramiko, no authentication.
+A single-file Python tool for auditing the SSH algorithm configuration of one host or an entire
+network fleet. Identifies weak, deprecated, and NSA-linked algorithms; scores each host 0–100;
+and checks results against industry compliance frameworks (NIST, FIPS 140-2, BSI TR-02102,
+ANSSI, PRIVACY_FOCUSED) — making it suitable for periodic security reviews, pre/post-hardening
+verification, and compliance evidence collection.
+
+Wraps the system `ssh` binary to probe each algorithm individually — no paramiko, no
+authentication, no credentials required. The tool never logs in and never executes commands;
+it only observes what the server is willing to negotiate.
 
 **Version:** 3.5.0 | **Author:** Robert Tulke
 
