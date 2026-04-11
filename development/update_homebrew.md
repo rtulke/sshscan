@@ -1,6 +1,6 @@
 # update_homebrew.sh — Release Helper
 
-sshscan developer only!
+For sshscan core-developer only!
 
 Updates the version in source code, README, CHANGELOG, commits and tags the
 sshscan repo, computes the release tarball SHA256, and updates the Homebrew formula.
