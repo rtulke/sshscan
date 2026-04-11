@@ -12,6 +12,9 @@ it only observes what the server is willing to negotiate.
 
 **Version:** 3.6.2 | **Author:** Robert Tulke
 
+![Example](/demo/sshscan.png)
+
+
 ---
 
 ## Table of Contents
