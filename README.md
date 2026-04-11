@@ -411,6 +411,7 @@ python3 sshscan.py --config privacy_focus.conf --file hosts.txt
 |---|---|
 | `--compliance FRAMEWORK` | Check results against a framework (see table below) |
 | `--list-frameworks` | List available compliance frameworks and exit |
+| `--list-algorithms` | List all scannable algorithms grouped by type, with weak/NSA annotations, and exit |
 | `--no-nsa-warnings` | Suppress NSA risk annotations in live output (analysis still runs; data included in exports) |
 
 ### Output

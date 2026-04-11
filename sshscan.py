@@ -2248,6 +2248,34 @@ class Spinner:
             sys.stderr.flush()
 
 
+def print_algorithm_list():
+    """Print all scannable algorithms grouped by type with weak/NSA annotations."""
+    weak  = SSHEnhancedScanner.WEAK_ALGORITHMS
+    nsa   = NSABackdoorDetector.SUSPECTED_NSA_ALGORITHMS
+    known = SSHEnhancedScanner.KNOWN_ALGORITHMS
+
+    labels = {
+        'cipher': 'Ciphers',
+        'mac':    'MACs',
+        'kex':    'Key Exchange',
+        'key':    'Host Keys',
+    }
+
+    print("Scannable algorithms:\n")
+    for algo_type, display in labels.items():
+        print(f"  {display} ({algo_type}):")
+        for name in known.get(algo_type, []):
+            flags = []
+            if name in weak.get(algo_type, []):
+                flags.append('[!] weak')
+            nsa_entry = nsa.get(algo_type, {}).get(name)
+            if nsa_entry:
+                flags.append(f'[!] nsa ({nsa_entry["risk"].lower()})')
+            flag_str = ('  ' + '  '.join(flags)) if flags else ''
+            print(f"    {name:<52}{flag_str}")
+        print()
+
+
 def main():
     """Main function"""
     parser = argparse.ArgumentParser(
@@ -2314,6 +2342,8 @@ Examples:
                         help='List available compliance frameworks')
     parser.add_argument('--list-filter', action='store_true',
                         help='List available --filter tokens')
+    parser.add_argument('--list-algorithms', action='store_true',
+                        help='List all scannable algorithms grouped by type, with weak/NSA annotations')
     parser.add_argument('--no-nsa-warnings', action='store_true',
                         help='Suppress NSA risk annotations in live output and summary (analysis still runs; NSA data included in exports)')
 
@@ -2393,6 +2423,11 @@ Examples:
         print("    --filter banner,security          banner + score, no algo detail")
         print("    --filter security,nsa             score + NSA algo lines")
         print("    --filter nsa,failed               NSA lines, compliance-failed hosts only")
+        return 0
+
+    # --list-algorithms: no scanner needed
+    if args.list_algorithms:
+        print_algorithm_list()
         return 0
 
     # Load config file if specified

@@ -28,6 +28,7 @@ _sshscan() {
            --compliance
            --list-frameworks
            --list-filter
+           --list-algorithms
            --no-nsa-warnings
            --format
         -o --output
