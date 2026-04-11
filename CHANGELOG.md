@@ -4,11 +4,25 @@ All notable changes to SSH Algorithm Security Scanner are documented here.
 
 ---
 
-## [3.6.1] — Current
+## [3.6.2] — Current
 
 ### New Features
 
-- <!-- describe changes here -->
+### Fixed
+
+- update workflow with editor auto mode<!-- describe changes here -->
+
+---
+
+## [3.6.1]
+
+update update_homebrew worflow and autom. workflow via update_homebrew.sh script
+
+### New Features
+
+### Fixes
+
+- Documentation and update script 
 
 ---
 

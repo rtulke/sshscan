@@ -10,7 +10,7 @@ Wraps the system `ssh` binary to probe each algorithm individually — no parami
 authentication, no credentials required. The tool never logs in and never executes commands;
 it only observes what the server is willing to negotiate.
 
-**Version:** 3.6.1 | **Author:** Robert Tulke
+**Version:** 3.6.2 | **Author:** Robert Tulke
 
 ---
 
