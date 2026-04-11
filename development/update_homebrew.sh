@@ -123,7 +123,7 @@ PYEOF
 ok "CHANGELOG.md  (placeholder section added for ${NEW_VERSION})"
 
 echo -e "\n  ${YELLOW}Opening CHANGELOG.md — fill in the [${NEW_VERSION}] section, save and quit to continue.${NC}"
-${EDITOR:-vi} "$SSHSCAN_DIR/CHANGELOG.md"
+${EDITOR:-vi} "$SSHSCAN_DIR/CHANGELOG.md" || true
 
 # ── Step 2: Commit, tag, push ─────────────────────────────────────────────────
 step "2/5" "Committing, tagging, pushing sshscan"
