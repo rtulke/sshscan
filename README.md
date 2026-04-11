@@ -191,6 +191,7 @@ sshscan --version
 Upgrade when a new version is released:
 
 ```bash
+brew update
 brew upgrade sshscan
 ```
 
