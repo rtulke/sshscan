@@ -29,6 +29,7 @@ it only observes what the server is willing to negotiate.
   - [Windows (WSL or native OpenSSH)](#windows-wsl-or-native-openssh)
   - [Virtual environment (recommended)](#virtual-environment-recommended)
   - [System-wide configuration](#system-wide-configuration)
+  - [Tab Completion (Linux)](#tab-completion-linux)
 - [Configuration](#configuration)
   - [Config file auto-discovery](#config-file-auto-discovery-no---config-needed)
   - [`[scanner]` keys](#scanner-keys)
@@ -250,6 +251,44 @@ python3 sshscan.py --version
 mkdir -p ~/.conf
 cp sshscan.conf ~/.conf/sshscan.conf
 # Edit to taste — loaded automatically without --config
+```
+
+### Tab Completion (Linux)
+
+The completion script lives in `completion/sshscan.bash-completion` and works with
+any distribution that has the `bash-completion` package installed.
+
+**Install bash-completion if not already present**
+
+```bash
+# Debian / Ubuntu / Mint / Raspberry Pi OS
+sudo apt install bash-completion
+
+# RHEL / Rocky / AlmaLinux / Fedora
+sudo dnf install bash-completion
+
+# Arch Linux
+sudo pacman -S bash-completion
+```
+
+**Install the sshscan completion — system-wide**
+
+```bash
+sudo cp completion/sshscan.bash-completion /etc/bash_completion.d/sshscan
+```
+
+**Install for your user only** (no sudo required)
+
+```bash
+mkdir -p ~/.local/share/bash-completion/completions
+cp completion/sshscan.bash-completion ~/.local/share/bash-completion/completions/sshscan
+```
+
+Open a new shell and tab completion is active. To test immediately in the current
+session without installing:
+
+```bash
+source completion/sshscan.bash-completion
 ```
 
 ---

@@ -1,0 +1,101 @@
+# Bash tab completion for sshscan
+#
+# Install (choose one):
+#   System-wide:  sudo cp sshscan.bash-completion /etc/bash_completion.d/sshscan
+#   User-only:    cp sshscan.bash-completion ~/.local/share/bash-completion/completions/sshscan
+#   Quick test:   source completion/sshscan.bash-completion
+
+_sshscan() {
+    local cur prev
+    _init_completion || return
+
+    local all_opts="
+        -V --version
+        -c --config
+        -H --host
+        -f --file
+        -l --local
+        -p --port
+        -T --threads
+        -t --timeout
+           --retry-attempts
+           --rate-limit
+           --timeout-banner
+           --strict-host-key-checking
+           --jump-host
+           --proxy-command
+        -e --explicit
+           --compliance
+           --list-frameworks
+           --list-filter
+           --no-nsa-warnings
+           --format
+        -o --output
+           --filter
+           --summary
+           --summary-only
+        -v --verbose
+           --debug
+           --no-color
+        -n --show-hostnames
+    "
+
+    case "$prev" in
+        # File path arguments
+        --config|-c|--output|-o)
+            _filedir
+            return
+            ;;
+        --file|-f)
+            _filedir '@(txt|json|yaml|yml|csv)'
+            return
+            ;;
+
+        # Fixed-choice arguments
+        --compliance)
+            COMPREPLY=( $(compgen -W "NIST FIPS_140_2 BSI_TR_02102 ANSSI PRIVACY_FOCUSED" -- "$cur") )
+            return
+            ;;
+        --format)
+            COMPREPLY=( $(compgen -W "json csv yaml" -- "$cur") )
+            return
+            ;;
+        --strict-host-key-checking)
+            COMPREPLY=( $(compgen -W "yes no accept-new" -- "$cur") )
+            return
+            ;;
+
+        # --filter accepts comma-separated tokens; complete the last token after the last comma
+        --filter)
+            local tokens="supported unsupported flagged weak nsa cipher mac kex hostkey banner security passed failed error"
+            if [[ "$cur" == *,* ]]; then
+                local prefix="${cur%,*},"
+                local last="${cur##*,}"
+                local matches
+                matches=$(compgen -W "$tokens" -- "$last")
+                COMPREPLY=( $(printf '%s\n' $matches | sed "s|^|${prefix}|") )
+            else
+                COMPREPLY=( $(compgen -W "$tokens" -- "$cur") )
+            fi
+            return
+            ;;
+
+        # Numeric / free-form — no suggestions
+        --port|-p|--threads|-T|--timeout|-t|--retry-attempts|--timeout-banner|--rate-limit)
+            return
+            ;;
+        --host|-H|--jump-host|--proxy-command|--explicit|-e)
+            return
+            ;;
+    esac
+
+    # Default: complete option flags
+    if [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "$all_opts" -- "$cur") )
+        return
+    fi
+}
+
+# Register for both invocation styles
+complete -F _sshscan sshscan
+complete -F _sshscan sshscan.py
