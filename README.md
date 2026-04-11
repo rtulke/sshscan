@@ -681,7 +681,7 @@ python3 sshscan.py --file hosts.txt --proxy-command "nc -X 5 -x 127.0.0.1:1080 %
 python3 sshscan.py --file hosts.txt --proxy-command "nc -X connect -x proxy.corp:3128 %h %p"
 ```
 
-Or set in `sshscan.conf`:
+Or set a global configuration in `sshscan.conf`:
 
 ```ini
 [scanner]
