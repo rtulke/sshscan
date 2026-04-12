@@ -4,7 +4,35 @@ All notable changes to SSH Algorithm Security Scanner are documented here.
 
 ---
 
-## [3.6.3] — Current
+## [3.6.4] — Current
+
+Improve IPv6 support: fix validation, add --prefer-ipv6 / --ipv6-only
+
+### New Features
+
+sshscan.py:
+    - Added ipv6_only parameter to resolve()
+    - Added self.prefer_ipv6 and self.ipv6_only to SSHEnhancedScanner.__init__()
+    - Added --prefer-ipv6 and --ipv6-only argparse arguments
+    - Wired both flags in main()
+README.md:
+    - Added --prefer-ipv6 and --ipv6-only to Scanning options table
+completion/sshscan.bash-completion:
+    - Added --prefer-ipv6 and --ipv6-only
+
+### Fixes
+
+sshscan.py:
+    - Fixed _is_valid_hostname() to accept IPv6 literals before the DNS-name regex
+    - Fixed parse_host_string() to handle [::1] without port
+    - Pass prefer_ipv4/ipv6_only to resolve() in parse_host_string()
+README.md:
+    - Updated IPv6 notation note in Input File Formats
+    - Updated IPv6 Troubleshooting entry
+
+---
+
+## [3.6.3]
 
 ### New Features
 
