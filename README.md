@@ -439,6 +439,12 @@ python3 sshscan.py --config privacy_focus.conf --file hosts.txt
 python3 sshscan.py --host example.com
 python3 sshscan.py --host example.com:2222
 python3 sshscan.py --host 192.168.1.1
+
+# IPv6
+python3 sshscan.py --host "[2001:db8::1]:22"
+python3 sshscan.py --host "[::1]"
+python3 sshscan.py --host 2001:db8::1
+python3 sshscan.py --host "[2001:db8::1]:22" --prefer-ipv6
 ```
 
 ### Multiple hosts
