@@ -398,6 +398,8 @@ python3 sshscan.py --config privacy_focus.conf --file hosts.txt
 | `--strict-host-key-checking MODE` | | accept-new | SSH StrictHostKeyChecking: yes / no / accept-new |
 | `--jump-host [USER@]HOST[:PORT]` | | — | Route all connections through an SSH jump / bastion host |
 | `--proxy-command CMD` | | — | Route all connections via a ProxyCommand (SOCKS5/HTTP CONNECT) |
+| `--prefer-ipv6` | | off | Prefer IPv6 (AAAA) when a host resolves to both A and AAAA records |
+| `--ipv6-only` | | off | Scan only via IPv6; skip hosts that have no AAAA record (implies `--prefer-ipv6`) |
 
 ### Algorithm testing
 
@@ -899,7 +901,10 @@ server2.example.com,2222
 ```
 
 Duplicate hosts (same IP + port) are silently skipped regardless of file format.
-IPv6 addresses use bracket notation: `[::1]:22` or `[2001:db8::1]:22`.
+IPv6 addresses can be specified in three ways:
+- Bracket notation with port: `[::1]:22`, `[2001:db8::1]:2222`
+- Bracket notation without port (uses `--port` default): `[::1]`, `[2001:db8::1]`
+- Bare address without port: `2001:db8::1`
 
 ---
 
@@ -931,7 +936,9 @@ Increase threads: `--threads 50`. Ensure DNS resolves quickly (or use IP address
 Use `--rate-limit 2.0` to cap at 2 new connections per second.
 
 **IPv6 hosts not connecting**
-Use bracket notation: `--host "[2001:db8::1]:22"` or put `[2001:db8::1]:22` in your host file.
+Use bracket notation: `--host "[2001:db8::1]:22"` or a bare address `--host "2001:db8::1"` (uses default port).
+If the host resolves to both A and AAAA records and IPv4 is being used, add `--prefer-ipv6` to force IPv6.
+To skip all hosts that have no AAAA record, use `--ipv6-only`.
 
 **All algorithms show as not supported on a specific host**
 The host may be blocking the connection entirely (firewall, wrong port).

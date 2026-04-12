@@ -24,6 +24,8 @@ _sshscan() {
            --strict-host-key-checking
            --jump-host
            --proxy-command
+           --prefer-ipv6
+           --ipv6-only
         -e --explicit
            --compliance
            --list-frameworks

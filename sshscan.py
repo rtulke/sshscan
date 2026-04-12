@@ -237,7 +237,7 @@ class EnhancedDNSCache:
                 self.stats['cleanups'] += len(expired_keys)
                 logger.debug(f"Cleaned {len(expired_keys)} expired DNS entries")
     
-    def resolve(self, hostname: str, prefer_ipv4: bool = True) -> Optional[str]:
+    def resolve(self, hostname: str, prefer_ipv4: bool = True, ipv6_only: bool = False) -> Optional[str]:
         """Resolve hostname with caching and IPv6 support"""
         # Validate hostname first
         if not self._is_valid_hostname(hostname):
@@ -281,7 +281,12 @@ class EnhancedDNSCache:
                     ipv6_addrs.append(ip)
             
             # Choose based on preference
-            if prefer_ipv4 and ipv4_addrs:
+            if ipv6_only:
+                if ipv6_addrs:
+                    resolved_ip = ipv6_addrs[0]
+                else:
+                    raise socket.gaierror(f"No IPv6 (AAAA) address found")
+            elif prefer_ipv4 and ipv4_addrs:
                 resolved_ip = ipv4_addrs[0]
             elif ipv6_addrs:
                 resolved_ip = ipv6_addrs[0]
@@ -311,11 +316,17 @@ class EnhancedDNSCache:
     
     def _is_valid_hostname(self, hostname: str) -> bool:
         """Validate hostname to prevent injection attacks"""
-        # Basic validation - alphanumeric, dots, hyphens
         if not hostname or len(hostname) > 253:
             return False
-        
-        # Check for valid characters
+
+        # Accept IPv6 literals (e.g. "2001:db8::1", "::1") before the DNS-name regex
+        try:
+            ipaddress.ip_address(hostname)
+            return True
+        except ValueError:
+            pass
+
+        # Check for valid DNS-name characters: letters, digits, dot, hyphen
         allowed = re.match(r'^[a-zA-Z0-9.-]+$', hostname)
         if not allowed:
             return False
@@ -1153,6 +1164,8 @@ class SSHEnhancedScanner:
         self.jump_host: Optional[str] = scanner_config.get('jump_host', None)
         self.proxy_command: Optional[str] = scanner_config.get('proxy_command', None)
         self._proxy_map: Dict[str, ProxyConfig] = {}  # "host:port" → ProxyConfig
+        self.prefer_ipv6: bool = False   # prefer AAAA over A when both exist
+        self.ipv6_only: bool = False     # skip hosts that have no AAAA record
 
         logger.info(f"Initialized scanner with {self.max_workers} threads, "
                    f"DNS cache TTL={self.dns_cache_ttl}s")
@@ -1191,11 +1204,15 @@ class SSHEnhancedScanner:
         
         logger.debug(f"Parsing host string: {host_string}")
         
-        # Check for IPv6 format [::1]:22
+        # IPv6 with explicit port: [::1]:22
         ipv6_match = re.match(r'^\[([^\]]+)\]:(\d+)$', host_string)
         if ipv6_match:
             host = ipv6_match.group(1)
             port = int(ipv6_match.group(2))
+        # IPv6 without port: [::1]  →  use default_port
+        elif re.match(r'^\[([^\]]+)\]$', host_string):
+            host = re.match(r'^\[([^\]]+)\]$', host_string).group(1)
+            port = default_port
         else:
             # Standard host:port format
             if ':' in host_string and not validate_ip_address(host_string):
@@ -1215,7 +1232,11 @@ class SSHEnhancedScanner:
         port = validate_port(port)
         
         # Resolve hostname using DNS cache
-        resolved_ip = self.dns_cache.resolve(host.strip())
+        resolved_ip = self.dns_cache.resolve(
+            host.strip(),
+            prefer_ipv4=not self.prefer_ipv6,
+            ipv6_only=self.ipv6_only,
+        )
         if resolved_ip:
             original = host.strip()
             if original != resolved_ip:
@@ -1223,6 +1244,8 @@ class SSHEnhancedScanner:
             logger.debug(f"Parsed and resolved {host_string} -> {resolved_ip}:{port}")
             return resolved_ip, port
         else:
+            if self.ipv6_only:
+                raise ValidationError(f"No IPv6 address found for '{host}'")
             logger.warning(f"DNS resolution failed for {host}, using hostname directly")
             return host.strip(), port
     
@@ -2329,6 +2352,10 @@ Examples:
                         help='Route all connections through an SSH jump/bastion host, e.g. admin@bastion.corp:22')
     parser.add_argument('--proxy-command', default=None, metavar='CMD',
                         help='Route all connections via a ProxyCommand, e.g. "nc -X 5 -x socks5host:1080 %%h %%p"')
+    parser.add_argument('--prefer-ipv6', action='store_true',
+                        help='Prefer IPv6 (AAAA) addresses when a host resolves to both A and AAAA records')
+    parser.add_argument('--ipv6-only', action='store_true',
+                        help='Scan only via IPv6; skip hosts that have no AAAA record')
 
     # Algorithm testing
     parser.add_argument('--explicit', '-e', metavar='ALGOS',
@@ -2495,6 +2522,11 @@ Examples:
             scanner.show_nsa_warnings = not args.no_nsa_warnings
             scanner.summary_only = args.summary_only
             scanner.show_hostnames = args.show_hostnames
+            if args.ipv6_only:
+                scanner.ipv6_only = True
+                scanner.prefer_ipv6 = True   # ipv6_only implies prefer_ipv6
+            elif args.prefer_ipv6:
+                scanner.prefer_ipv6 = True
             # Disable color if explicitly requested, or when piping format output to stdout
             if args.no_color or (args.format and not args.output):
                 scanner.use_color = False
