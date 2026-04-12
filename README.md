@@ -462,6 +462,22 @@ cat hosts.txt | python3 sshscan.py
 
 # Multiple formats work
 printf "server1.com\n192.168.1.1:2222\nserver3.com" | python3 sshscan.py
+
+# IPv6 — mixed with IPv4 in a comma-separated list
+python3 sshscan.py --host "192.168.1.1,[2001:db8::1]:22,[::1]"
+
+# IPv6 — from a hosts file (bracket notation, one per line)
+# hosts.txt:
+#   [2001:db8::1]:22
+#   [2001:db8::2]:2222
+#   [::1]
+python3 sshscan.py --file hosts.txt
+
+# IPv6 — prefer AAAA when hostnames resolve to both A and AAAA
+python3 sshscan.py --file hosts.txt --prefer-ipv6
+
+# IPv6 — skip hosts that have no AAAA record
+python3 sshscan.py --file hosts.txt --ipv6-only
 ```
 
 ### Local SSH server
