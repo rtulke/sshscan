@@ -393,7 +393,7 @@ python3 sshscan.py --config privacy_focus.conf --file hosts.txt
 | `--port PORT` | `-p` | 22 | Default SSH port for hosts without explicit port |
 | `--threads N` | `-T` | 20 | Concurrent scan threads |
 | `--timeout SEC` | `-t` | 10 | SSH connection timeout in seconds |
-| `--retry-attempts N` | | 3 | Retry attempts with exponential backoff |
+| `--retry-attempts N` | | 3 | Retry attempts for failed/dropped connections (short delay between tries) |
 | `--rate-limit N` | | unlimited | Max new SSH connections per second |
 | `--timeout-banner SEC` | | min(timeout,5) | Timeout for initial SSH banner grab only |
 | `--strict-host-key-checking MODE` | | accept-new | SSH StrictHostKeyChecking: yes / no / accept-new |
