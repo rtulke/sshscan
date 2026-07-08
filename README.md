@@ -321,6 +321,7 @@ CLI arguments always override config file values.
 | `strict_host_key_checking` | string | yes / no / accept-new | accept-new | `--strict-host-key-checking` |
 | `jump_host` | string | `[user@]host[:port]` | — | `--jump-host` |
 | `proxy_command` | string | ProxyCommand | — | `--proxy-command` |
+| `fast` | bool | yes / no | no | `--fast` |
 
 ### `[compliance]` keys
 
@@ -400,6 +401,7 @@ python3 sshscan.py --config privacy_focus.conf --file hosts.txt
 | `--proxy-command CMD` | | — | Route all connections via a ProxyCommand (SOCKS5/HTTP CONNECT) |
 | `--prefer-ipv6` | | off | Prefer IPv6 (AAAA) when a host resolves to both A and AAAA records |
 | `--ipv6-only` | | off | Scan only via IPv6; skip hosts that have no AAAA record (implies `--prefer-ipv6`) |
+| `--fast` | | off | Read the server KEXINIT in a single connection instead of probing each algorithm; falls back to probing behind a proxy/jump-host |
 
 ### Algorithm testing
 
@@ -589,7 +591,16 @@ python3 sshscan.py --file hosts.txt --timeout 30 --timeout-banner 5
 
 # Conservative: 10 threads, 3 retries, long timeout
 python3 sshscan.py --file hosts.txt --threads 10 --timeout 30 --retry-attempts 5
+
+# Fast mode: one connection per host (reads the server KEXINIT) instead of ~50
+python3 sshscan.py --file hosts.txt --fast
 ```
+
+**Fast mode (`--fast`)** reads the server's algorithm proposal (`SSH_MSG_KEXINIT`)
+in a single connection instead of opening one connection per algorithm — a large
+speedup on big fleets. Scores, filters and compliance results are identical to the
+default mode. It automatically falls back to per-algorithm probing when a
+jump-host/proxy is configured (raw sockets can't traverse them).
 
 ### Specific algorithm testing
 
