@@ -1,3 +1,6 @@
 # SSH Algorithm Security Scanner — Dependencies
 
-PyYAML>=6.0.1    # YAML host file support (.yaml / .yml)
+# Hard requirement, not optional: sshscan.py does `import yaml` at module level,
+# so the tool will not start at all without it -- not even `--version`.
+# Used for YAML host files (.yaml / .yml) and YAML export (--format yaml).
+PyYAML>=6.0.1

@@ -127,7 +127,7 @@ logs in and never executes commands; it only observes what the server is willing
 |---|---|
 | Python | 3.8+ |
 | OpenSSH client | `ssh` in PATH |
-| PyYAML | for YAML host files and YAML export |
+| PyYAML | required — imported at module level, the tool does not start without it |
 
 ```bash
 pip install -r requirements.txt
