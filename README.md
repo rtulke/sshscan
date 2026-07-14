@@ -12,7 +12,7 @@ so results do not depend on the local SSH client version. A per-algorithm probin
 instead. Either way: no paramiko, no authentication, no credentials required — the tool never
 logs in and never executes commands; it only observes what the server is willing to negotiate.
 
-**Version:** 3.7.2 | **Author:** Robert Tulke
+**Version:** 3.7.3 | **Author:** Robert Tulke
 
 ![Example](/demo/sshscan.png)
 
@@ -204,14 +204,14 @@ or where the distro's Python is too old.
 
 ```bash
 # pick the variant and architecture you need
-curl -LO https://github.com/rtulke/sshscan/releases/latest/download/sshscan_3.7.2_amd64.deb
-sudo apt install ./sshscan_3.7.2_amd64.deb
+curl -LO https://github.com/rtulke/sshscan/releases/latest/download/sshscan_3.7.3_amd64.deb
+sudo apt install ./sshscan_3.7.3_amd64.deb
 ```
 
 **RHEL / Rocky / AlmaLinux / Fedora**:
 
 ```bash
-sudo dnf install https://github.com/rtulke/sshscan/releases/latest/download/sshscan-3.7.2-1.x86_64.rpm
+sudo dnf install https://github.com/rtulke/sshscan/releases/latest/download/sshscan-3.7.3-1.x86_64.rpm
 ```
 
 Both pull in the OpenSSH client (`openssh-client` / `openssh-clients`) automatically, drop a default

@@ -4,7 +4,33 @@ All notable changes to SSH Algorithm Security Scanner are documented here.
 
 ---
 
-## [3.7.2] — Current
+## [3.7.3] — Current
+
+### New Features
+
+.github/workflows/release.yml:
+    - Tagged releases now ship .deb and .rpm packages for amd64/x86_64 and
+      arm64/aarch64, in two flavours: `sshscan` (the Python script, ~50 KB,
+      uses the distro's python3 + PyYAML) and `sshscan-bin` (self-contained
+      PyInstaller binary, ~8.6 MB, no Python required). They Provide/Conflict
+      with each other; both install /usr/bin/sshscan, a default config at
+      /etc/sshscan/sshscan.conf and bash completion.
+    - Packages are installed via apt/dnf and executed in Debian 12/13,
+      Rocky 9 and Fedora containers before they ship, so the declared
+      dependencies are proven to resolve.
+
+### Fixes
+
+.github/workflows/release.yml:
+    - Linux binaries are now built in an almalinux:8 container (glibc 2.28)
+      instead of on the Ubuntu 22.04 runner (glibc 2.35). RHEL/Rocky/Alma 9
+      ship glibc 2.34 — older than the runner — so the previous binaries
+      installed but refused to start there. They now run on RHEL 8+,
+      Debian 10+ and Ubuntu 20.04+.
+
+---
+
+## [3.7.2]
 
 Tooling release: tagged releases now ship prebuilt binaries. No functional
 change to the scanner — sshscan.py is identical to 3.7.1.
