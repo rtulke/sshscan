@@ -1,16 +1,18 @@
 # SSH Algorithm Security Scanner
 
-A single-file Python tool for auditing and compliant the SSH algorithm configuration of one host or an entire
+A single-file Python tool for auditing the SSH algorithm configuration of one host or an entire
 network fleet. Identifies weak, deprecated, and NSA-linked algorithms; scores each host 0–100;
 and checks results against industry compliance frameworks (NIST, FIPS 140-2, BSI TR-02102,
 ANSSI, PRIVACY_FOCUSED) — making it suitable for periodic security reviews, pre/post-hardening
 verification, and compliance evidence collection.
 
-Wraps the system `ssh` binary to probe each algorithm individually — no paramiko, no
-authentication, no credentials required. The tool never logs in and never executes commands;
-it only observes what the server is willing to negotiate.
+By default it reads the server's algorithm proposal (`SSH_MSG_KEXINIT`) in a single connection,
+so results do not depend on the local SSH client version. A per-algorithm probing mode
+(`--probe`, also used automatically behind jump-hosts/proxies) wraps the system `ssh` binary
+instead. Either way: no paramiko, no authentication, no credentials required — the tool never
+logs in and never executes commands; it only observes what the server is willing to negotiate.
 
-**Version:** 3.6.4 | **Author:** Robert Tulke
+**Version:** 3.7.0 | **Author:** Robert Tulke
 
 ![Example](/demo/sshscan.png)
 
@@ -44,6 +46,8 @@ it only observes what the server is willing to negotiate.
   - [Algorithm testing](#algorithm-testing)
   - [Compliance](#compliance)
   - [Output](#output)
+- [Scan Modes](#scan-modes)
+- [Output Markers](#output-markers)
 - [Usage Examples](#usage-examples)
   - [Single host](#single-host)
   - [Multiple hosts](#multiple-hosts)
@@ -110,7 +114,7 @@ it only observes what the server is willing to negotiate.
 - **No CVE integration** — does not map findings to CVE IDs
 - **No daemon / continuous monitoring** — single-run tool
 - **Windows**: works fine under WSL (Windows Subsystem for Linux); native Windows requires the OpenSSH client (`winget install Microsoft.OpenSSH.Beta` or via Optional Features) — the tool should run but is untested, and `/etc/sshscan/` auto-discovery does not apply
-- **No paramiko** — depends on the system SSH binary; behavior reflects the installed SSH client version
+- **No paramiko** — the default fast mode uses raw sockets; `--probe` mode uses the system `ssh` binary and its results reflect the installed SSH client version
 - **No scan resume** — interrupted scans cannot be continued
 
 ---
@@ -151,12 +155,17 @@ pip install pyyaml
 | Alpine Linux | Untested | Requires `openssh-client` package; the BusyBox `ssh` stub is not sufficient |
 
 > **OpenSSH client version on the scanner host:**
-> - Minimum: OpenSSH 7.x — covers all algorithms except the post-quantum KEX entries
-> - Full feature support: OpenSSH 9.9+ — required to probe `mlkem768x25519-sha256` (ML-KEM)
-> - OpenSSH 8.5–9.8 — can probe `sntrup761x25519-sha512@openssh.com` (NTRU Prime hybrid)
+> In the default **fast** mode the local client version is irrelevant — the scanner reads the
+> server's KEXINIT directly over a socket and never asks the local `ssh` to negotiate. The client
+> version only matters in `--probe` mode (and when tunnelling through a jump-host/proxy, which
+> forces probing):
+> - Minimum: OpenSSH 7.x
+> - `sntrup761x25519-sha512@openssh.com` (NTRU Prime hybrid) requires OpenSSH 8.5+
+> - `mlkem768x25519-sha256` (ML-KEM) requires OpenSSH 9.9+
 >
-> The scanner detects which algorithms the local SSH client supports and skips those it cannot
-> probe, so operation is graceful on older OpenSSH versions.
+> In probe mode the scanner can only test algorithms the local client itself implements: an old
+> client under-reports a modern server, and a very new client cannot test legacy algorithms it has
+> dropped. Fast mode (the default) has neither limitation — prefer it whenever possible.
 
 ### Scan targets (what can be scanned)
 
@@ -321,7 +330,7 @@ CLI arguments always override config file values.
 | `strict_host_key_checking` | string | yes / no / accept-new | accept-new | `--strict-host-key-checking` |
 | `jump_host` | string | `[user@]host[:port]` | — | `--jump-host` |
 | `proxy_command` | string | ProxyCommand | — | `--proxy-command` |
-| `fast` | bool | yes / no | no | `--fast` |
+| `fast` | bool | yes / no | yes | `--fast` / `--probe` |
 
 ### `[compliance]` keys
 
@@ -401,7 +410,8 @@ python3 sshscan.py --config privacy_focus.conf --file hosts.txt
 | `--proxy-command CMD` | | — | Route all connections via a ProxyCommand (SOCKS5/HTTP CONNECT) |
 | `--prefer-ipv6` | | off | Prefer IPv6 (AAAA) when a host resolves to both A and AAAA records |
 | `--ipv6-only` | | off | Scan only via IPv6; skip hosts that have no AAAA record (implies `--prefer-ipv6`) |
-| `--fast` | | off | Read the server KEXINIT in a single connection instead of probing each algorithm; falls back to probing behind a proxy/jump-host |
+| `--fast` | | *(default)* | Read the server KEXINIT in a single connection (already the default mode); kept as an explicit flag for scripts/config |
+| `--probe` | | off | Force per-algorithm probing via the local `ssh` client instead of the default KEXINIT read (for proxies/debugging). Mutually exclusive with `--fast` |
 
 ### Algorithm testing
 
@@ -426,10 +436,53 @@ python3 sshscan.py --config privacy_focus.conf --file hosts.txt
 | `--output FILE` | `-o` | Write exported results to FILE (default: stdout) |
 | `--filter TOKENS` | | Filter live output (see Filter section) |
 | `--list-filter` | | List all filter tokens and exit |
+| `--legend` | | Explain the output markers (see [Output Markers](#output-markers)) and exit |
 | `--summary` | | Print aggregated summary after scan |
 | `--summary-only` | | Suppress live output; show only summary (with spinner) |
 | `--verbose` | `-v` | Verbose logging (INFO level) |
 | `--debug` | | Full debug logging with function names and line numbers |
+
+---
+
+## Scan Modes
+
+The scanner has two ways to determine which algorithms a server offers:
+
+| Mode | Flag | How it works | Notes |
+|---|---|---|---|
+| **Fast** (default) | *(none)* / `--fast` | One connection; reads the server's `SSH_MSG_KEXINIT` proposal | Client-independent; one connection per host |
+| **Probe** | `--probe` | One connection per algorithm; asks the local `ssh` client to negotiate each | Bounded by what the local `ssh` client can speak; used automatically behind jump-hosts/proxies |
+
+**Fast is the default** because it is faster (one connection instead of ~70) and, crucially,
+**client-independent**: it reports exactly what the server advertises regardless of the local
+OpenSSH version. Probe mode can only test algorithms the local client itself implements — a very
+old client makes a modern server look nearly empty (false negatives), and a very new client cannot
+test legacy algorithms it has dropped.
+
+Fast mode automatically falls back to probing when a jump-host/proxy is configured (a raw socket
+cannot traverse them), so `--probe` is rarely needed explicitly. `--fast` and `--probe` are
+mutually exclusive. Scores, filters and compliance results are identical between the two modes.
+
+---
+
+## Output Markers
+
+Each algorithm line is prefixed with a two-character marker `[<presence><severity>]`.
+Run `python3 sshscan.py --legend` to print this reference.
+
+| Marker | Meaning | Color |
+|---|---|---|
+| `[+ ]` | Offered by the server, no known weakness | green |
+| `[+!]` | Offered, weak / deprecated | yellow |
+| `[+~]` | Offered, NSA-suspicious (medium risk) | yellow |
+| `[+x]` | Offered, NSA-suspicious (high risk) | red |
+| `[- ]` | Not offered by the server | grey |
+
+- **1st character** — presence: `+` offered, `-` not offered.
+- **2nd character** — severity: space (ok), `!` weak, `~` NSA medium, `x` NSA high.
+
+Status lines (Banner, Security Score, Compliance, Scan time) carry **no** marker and are set
+apart from the per-algorithm results by a blank line — they are summary output, not test results.
 
 ---
 
@@ -592,15 +645,15 @@ python3 sshscan.py --file hosts.txt --timeout 30 --timeout-banner 5
 # Conservative: 10 threads, 3 retries, long timeout
 python3 sshscan.py --file hosts.txt --threads 10 --timeout 30 --retry-attempts 5
 
-# Fast mode: one connection per host (reads the server KEXINIT) instead of ~50
-python3 sshscan.py --file hosts.txt --fast
+# Force legacy per-algorithm probing (the fast KEXINIT read is the default)
+python3 sshscan.py --file hosts.txt --probe
 ```
 
-**Fast mode (`--fast`)** reads the server's algorithm proposal (`SSH_MSG_KEXINIT`)
-in a single connection instead of opening one connection per algorithm — a large
-speedup on big fleets. Scores, filters and compliance results are identical to the
-default mode. It automatically falls back to per-algorithm probing when a
-jump-host/proxy is configured (raw sockets can't traverse them).
+Fast mode — reading the server's `SSH_MSG_KEXINIT` in a single connection — is the **default**:
+one connection per host instead of ~70, and independent of the local SSH client version. See
+[Scan Modes](#scan-modes) for the difference between the default and `--probe`. It automatically
+falls back to per-algorithm probing when a jump-host/proxy is configured (raw sockets can't
+traverse them).
 
 ### Specific algorithm testing
 
@@ -785,11 +838,11 @@ Filter by security classification:
 
 | Token | Shows | Marker |
 |---|---|---|
-| `supported` | Algorithms the server supports, no warning | `[x]` |
-| `unsupported` | Algorithms the server does not support | `[-]` |
-| `flagged` | All flagged algorithms (weak + NSA combined) | `[!]` |
-| `weak` | Weak/deprecated algorithms only (subset of flagged) | `[!]` |
-| `nsa` | NSA-suspected algorithms only (subset of flagged) | `[!]` |
+| `supported` | Algorithms the server supports, no warning | `[+ ]` |
+| `unsupported` | Algorithms the server does not support | `[- ]` |
+| `flagged` | All flagged algorithms (weak + NSA combined) | `[+!]` / `[+~]` / `[+x]` |
+| `weak` | Weak/deprecated algorithms only (subset of flagged) | `[+!]` |
+| `nsa` | NSA-suspected algorithms only (subset of flagged) | `[+~]` / `[+x]` |
 
 ### Type tokens
 
@@ -829,10 +882,10 @@ completes, then flushed or discarded based on the result.
 
 | Framework | Description | Minimum Score |
 |---|---|---|
-| `NIST` | NIST Cybersecurity Framework — balanced baseline | 70 |
+| `NIST` | NIST SP 800-53 / IR 7966 — balanced baseline; requires Curve25519/Ed25519 (NIST-approved since SP 800-186 / FIPS 186-5), P-curves permitted | 80 |
 | `FIPS_140_2` | FIPS 140-2 Level 1 — requires NIST curves, forbids Curve25519 | 90 |
 | `BSI_TR_02102` | German BSI TR-02102-4 — very strict, requires ETM MACs | 85 |
-| `ANSSI` | French ANSSI guidelines — highest strictness | 90 |
+| `ANSSI` | French ANSSI guidelines — highest strictness | 95 |
 | `PRIVACY_FOCUSED` | Anti-surveillance — forbids all NIST curves, requires Curve25519/Ed25519 | 95 |
 
 Each framework defines required and forbidden algorithms per category (cipher, MAC, KEX, host key)
@@ -959,8 +1012,9 @@ Codes 2 and 3 can occur together; code 2 takes precedence.
 **All hosts time out**
 Increase timeout or reduce threads: `--timeout 30 --threads 10`
 
-**"No matching cipher found" for everything**
-The local `ssh` binary may not support the algorithm. Check: `ssh -Q cipher`
+**"No matching cipher found" for everything (`--probe` mode)**
+The local `ssh` binary may not support the algorithm. Check with `ssh -Q cipher` — or just use the
+default fast mode, which reads the server KEXINIT directly and does not depend on the local client.
 
 **Scan is too slow**
 Increase threads: `--threads 50`. Ensure DNS resolves quickly (or use IP addresses directly).
@@ -986,6 +1040,14 @@ Check the SSH banner: if it's empty, the host is not reachable on that port.
 > [SSH Hardening Guide](hardening-examples/ssh_hardening_guide.md).
 > Ready-to-use config profiles are also available in
 > [`hardening-examples/`](hardening-examples/).
+>
+> To generate a hardened config matched to your exact OpenSSH version, use
+> [`sshd_hardening_wizard.py`](hardening-examples/sshd_hardening_wizard.py) — it emits only the
+> algorithms your version supports, so the result always passes `sshd -t`:
+>
+> ```bash
+> python3 hardening-examples/sshd_hardening_wizard.py --detect --profile balanced --format dropin
+> ```
 
 Once sshscan reports weak or NSA-flagged algorithms, the next step is removing them from
 the server configuration and optionally restricting what the SSH client will accept.
@@ -1002,9 +1064,11 @@ The configs below map directly to sshscan's compliance frameworks.
 
 #### Balanced — no weak algorithms, NIST curves allowed
 
-Removes all weak and deprecated algorithms. NIST P-curves (`ecdh-sha2-nistp*`,
-`ecdsa-sha2-nistp*`) are kept for broader client compatibility.
-Matches the **NIST**, **BSI\_TR\_02102**, and **ANSSI** compliance frameworks.
+Removes all weak and deprecated algorithms. NIST P-curve key exchange (`ecdh-sha2-nistp*`)
+is kept for broader client compatibility (host keys are Ed25519/RSA-SHA2 only).
+Targets the **NIST** framework. The stricter frameworks (**BSI\_TR\_02102**, **ANSSI**,
+**PRIVACY\_FOCUSED**) forbid or score-penalise the NIST P-curves — use the Strict profile below
+for those.
 
 ```ini
 # /etc/ssh/sshd_config
@@ -1122,7 +1186,7 @@ Host legacy.example.com
 After applying server changes, re-scan to confirm the result:
 
 ```bash
-# Check the local server — should show no [!] lines
+# Check the local server — should list no flagged ([+!]/[+~]/[+x]) lines
 python3 sshscan.py --local --filter flagged
 
 # Full compliance check against specific framework

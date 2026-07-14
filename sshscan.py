@@ -5,7 +5,7 @@ Features: Compliance Frameworks, NSA Backdoor Detection, INI Config,
          Retry Logic, DNS Caching, Enhanced Debug Mode, JumpHost/Bastion Function
 """
 
-__version__ = '3.6.4'
+__version__ = '3.7.0'
 __author__  = 'Robert Tulke, rt@debian.sh'
 
 import subprocess
@@ -757,15 +757,21 @@ class ComplianceFramework:
             'forbidden_mac': [
                 'hmac-md5', 'hmac-md5-96', 'hmac-sha1', 'hmac-sha1-96', 'umac-64'
             ],
+            # NIST now approves X25519 / Ed25519 (SP 800-186, FIPS 186-5), so we
+            # require those rather than the NIST P-curves. Requiring ecdh/ecdsa
+            # -nistp256 was self-defeating: the NSA-risk score penalty on P-curves
+            # capped a "NIST-configured" server below minimum_score, making NIST
+            # compliance structurally unreachable. P-curves remain permitted
+            # (not forbidden), just no longer mandatory.
             'required_kex': [
-                'ecdh-sha2-nistp256'
+                'curve25519-sha256'
             ],
             'forbidden_kex': [
                 'diffie-hellman-group1-sha1', 'diffie-hellman-group14-sha1',
                 'diffie-hellman-group-exchange-sha1'
             ],
             'required_hostkey': [
-                'ecdsa-sha2-nistp256'
+                'ssh-ed25519'
             ],
             'forbidden_hostkey': [
                 'ssh-dss', 'ssh-rsa'
@@ -1150,7 +1156,7 @@ class SSHEnhancedScanner:
         self._proxy_map: Dict[str, ProxyConfig] = {}  # "host:port" → ProxyConfig
         self.prefer_ipv6: bool = False   # prefer AAAA over A when both exist
         self.ipv6_only: bool = False     # skip hosts that have no AAAA record
-        self.fast_mode: bool = scanner_config.get('fast', False)  # KEXINIT single-connection enumeration
+        self.fast_mode: bool = scanner_config.get('fast', True)   # KEXINIT read is the default; --probe / fast=no forces probing
 
         logger.info(f"Initialized scanner with {self.max_workers} threads, "
                    f"DNS cache TTL={self.dns_cache_ttl}s")
@@ -1477,7 +1483,11 @@ class SSHEnhancedScanner:
         """
         cmd = [
             'ssh',
+            '-F', 'none',   # ignore local ssh_config (see test_algorithm_connection)
             '-o', 'BatchMode=yes',
+            '-o', 'ControlMaster=no',
+            '-o', 'ControlPath=none',
+            '-o', 'ControlPersist=no',
             '-o', f'ConnectTimeout={timeout}',
             '-o', 'StrictHostKeyChecking=no',
             '-o', 'UserKnownHostsFile=/dev/null',
@@ -1502,11 +1512,13 @@ class SSHEnhancedScanner:
     def test_algorithm_connection(self, host: str, algorithm: str, algo_type: str, port: int = 22) -> bool:
         """Test whether a remote SSH server supports a specific algorithm.
 
-        Always uses a fresh SSH connection — never a multiplexed one.
-        Multiplexed slaves reuse the master's already-negotiated session and
-        completely ignore Ciphers/MACs/KexAlgorithms/HostKeyAlgorithms options,
-        which would cause false positives for every algorithm the local client
-        supports regardless of what the server actually accepts.
+        Always uses a fresh, unmultiplexed SSH connection. Multiplexed slaves
+        reuse the master's already-negotiated session and completely ignore
+        Ciphers/MACs/KexAlgorithms/HostKeyAlgorithms options, which would cause
+        false positives for every algorithm the local client supports regardless
+        of what the server actually accepts. ControlMaster/ControlPath are forced
+        off below so this holds even when the user's ssh_config enables
+        multiplexing (a common cause of inflated "supported" results).
 
         Connection-level failures (refused, reset, dropped by fail2ban/MaxStartups,
         ...) are retried up to retry_attempts times and are never counted as
@@ -1526,18 +1538,43 @@ class SSHEnhancedScanner:
         # Validate inputs
         host = sanitize_host_input(host)
         port = validate_port(port)
-        
+
+        # A MAC is only negotiated alongside a non-AEAD cipher. AEAD ciphers
+        # (GCM, chacha20-poly1305) carry their own integrity, so when one is
+        # selected the server ignores the MAC name-list entirely. Because the
+        # default cipher order prefers AEAD, probing a MAC over the default
+        # ciphers succeeds for EVERY MAC regardless of support. Pin non-AEAD
+        # ciphers so the requested MAC is what actually decides the negotiation.
+        extra_opts = []
+        if algo_type == 'mac':
+            extra_opts = ['-o', 'Ciphers=aes256-ctr,aes192-ctr,aes128-ctr,'
+                                'aes256-cbc,aes192-cbc,aes128-cbc,3des-cbc']
+
         cmd = [
             'ssh',
+            # Ignore the local user's ssh_config: client-side directives
+            # (Ciphers/MACs/HostKeyAlgorithms/ControlMaster, etc.) would otherwise
+            # skew the negotiation being probed. We test the server, not our client.
+            '-F', 'none',
             '-o', 'BatchMode=yes',
+            # Force a fresh, unmultiplexed connection: a reused master would
+            # ignore the algorithm option below and report false positives.
+            '-o', 'ControlMaster=no',
+            '-o', 'ControlPath=none',
+            '-o', 'ControlPersist=no',
             '-o', f'ConnectTimeout={self.timeout}',
             '-o', f'StrictHostKeyChecking={self.strict_host_key_checking}',
             '-o', ssh_options[algo_type],
             '-o', 'PreferredAuthentications=none',
-            '-o', 'LogLevel=ERROR',
+            # LogLevel MUST stay at INFO (not ERROR/QUIET): OpenSSH emits the
+            # "Unable to negotiate ... no matching <type> found" line at INFO
+            # level. At ERROR it is suppressed, so an algorithm the server
+            # rejects leaves an empty stderr and is silently misread as
+            # "supported" — a false positive for every unsupported algorithm.
+            '-o', 'LogLevel=INFO',
             '-o', 'UserKnownHostsFile=/dev/null',
             '-p', str(port),
-        ] + self._proxy_args_for(host, port) + [
+        ] + extra_opts + self._proxy_args_for(host, port) + [
             host,
             'exit'
         ]
@@ -1554,6 +1591,8 @@ class SSHEnhancedScanner:
             b'bad ssh2 cipher spec',
             b'bad ssh2 mac spec',
             b'bad ssh2 kex spec',
+            b'bad ssh2 kexalgorithms',       # modern wording: Bad SSH2 KexAlgorithms 'X'.
+            b'unsupported kex algorithm',     # modern wording: Unsupported KEX algorithm "X"
             b'unknown cipher type',
             b'unknown mac type',
             b'unknown key type',
@@ -1747,21 +1786,23 @@ class SSHEnhancedScanner:
                     if not show:
                         return
 
-            # Build line
+            # Build line — Schema B two-char marker: [<presence><severity>]
+            #   presence: '+' offered by server / '-' not offered
+            #   severity: ' ' ok · '!' weak · '~' NSA medium · 'x' NSA high/critical
             if not is_supported:
-                line = f"[-] Host: {host_label}  {label}: {algo_name}"
+                line = f"[- ] Host: {host_label}  {label}: {algo_name}"
             elif nsa_info:
                 risk = nsa_info.get('risk', '').upper()
                 if risk in ('HIGH', 'CRITICAL'):
-                    line = f"[!] Host: {host_label}  {label}: {algo_name}  (NSA high risk)"
+                    line = f"[+x] Host: {host_label}  {label}: {algo_name}  (NSA high risk)"
                 elif risk == 'MEDIUM':
-                    line = f"[!] Host: {host_label}  {label}: {algo_name}  (NSA medium risk)"
+                    line = f"[+~] Host: {host_label}  {label}: {algo_name}  (NSA medium risk)"
                 else:
-                    line = f"[x] Host: {host_label}  {label}: {algo_name}"
+                    line = f"[+ ] Host: {host_label}  {label}: {algo_name}"
             elif is_weak:
-                line = f"[!] Host: {host_label}  {label}: {algo_name}  (weak)"
+                line = f"[+!] Host: {host_label}  {label}: {algo_name}  (weak)"
             else:
-                line = f"[x] Host: {host_label}  {label}: {algo_name}"
+                line = f"[+ ] Host: {host_label}  {label}: {algo_name}"
 
             # Apply color based on category
             if self.use_color:
@@ -1789,7 +1830,8 @@ class SSHEnhancedScanner:
                 logger.debug(f"No SSH banner received from {host}:{port}")
             else:
                 if not self.summary_only:
-                    _emit(_colorize(f"[x] Host: {host_label}  Banner: {result.ssh_banner}", _C_CYAN, self.use_color))
+                    # Banner is meta, not a per-algorithm result: no result marker.
+                    _emit(_colorize(f"Host: {host_label}  Banner: {result.ssh_banner}", _C_CYAN, self.use_color))
 
                 if explicit_algorithms:
                     explicit_results = self.test_explicit_algorithms(host, port, explicit_algorithms)
@@ -1843,23 +1885,26 @@ class SSHEnhancedScanner:
         result.scan_time = time.time() - start_time
 
         if not self.summary_only:
+            # Set the summary apart from the per-algorithm results with a blank
+            # line, and drop the result marker so it doesn't read as a test line.
+            _emit("")
             if result.status == 'success':
                 # In --explicit mode the score is just "% of tested algos supported",
                 # which is misleading, so it is not shown.
                 if not explicit_algorithms:
-                    _emit(_colorize(f"[x] Host: {host_label}  Security Score: {result.security_score}/100", _C_GREEN, self.use_color))
+                    _emit(_colorize(f"Host: {host_label}  Security Score: {result.security_score}/100", _C_GREEN, self.use_color))
                 if result.compliance_status and 'overall_compliant' in result.compliance_status:
                     fw = self.compliance_framework or 'N/A'
                     compliant = result.compliance_status['overall_compliant']
                     status_str = "PASS" if compliant else "FAIL"
                     cpl_color = _C_GREEN if compliant else _C_RED
-                    _emit(_colorize(f"[x] Host: {host_label}  Compliance {fw}: {status_str}", cpl_color, self.use_color))
+                    _emit(_colorize(f"Host: {host_label}  Compliance {fw}: {status_str}", cpl_color, self.use_color))
             else:
                 err = f" ({result.error_type})" if result.error_type else ""
-                _emit(_colorize(f"[x] Host: {host_label}  Status: failed{err}", _C_RED, self.use_color))
+                _emit(_colorize(f"Host: {host_label}  Status: failed{err}", _C_RED, self.use_color))
                 if result.error_message:
-                    _emit(_colorize(f"[x] Host: {host_label}  Error: {result.error_message}", _C_RED, self.use_color))
-            _emit(_colorize(f"[x] Host: {host_label}  Scanned in: {result.scan_time:.1f}s", _C_DIM, self.use_color))
+                    _emit(_colorize(f"Host: {host_label}  Error: {result.error_message}", _C_RED, self.use_color))
+            _emit(_colorize(f"Host: {host_label}  Scanned in: {result.scan_time:.1f}s", _C_DIM, self.use_color))
 
             # If host-level filtering is active: flush buffer for matching hosts, discard the rest
             if use_buffer:
@@ -2073,10 +2118,19 @@ class SSHEnhancedScanner:
             offset += n
             lists.append([x for x in raw.split(',') if x])
 
+        # The kex name-list also carries protocol-signalling pseudo-entries that
+        # are NOT selectable algorithms and must not be scored or listed: RFC 8308
+        # ext-info-{c,s} and the Terrapin strict-KEX markers kex-strict-{c,s}.
+        # Dropping them also keeps the fast path aligned with per-algorithm
+        # probing, which cannot test these markers.
+        kex_pseudo = {
+            'ext-info-c', 'ext-info-s',
+            'kex-strict-c-v00@openssh.com', 'kex-strict-s-v00@openssh.com',
+        }
         # Indices per RFC 4253: 0 kex, 1 host-key, 2 enc c2s, 3 enc s2c,
         # 4 mac c2s, 5 mac s2c, 6/7 compression, 8/9 languages.
         return {
-            'kex': set(lists[0]),
+            'kex': set(lists[0]) - kex_pseudo,
             'key': set(lists[1]),
             'cipher': set(lists[3]),   # server-to-client encryption
             'mac': set(lists[5]),      # server-to-client MAC
@@ -2513,10 +2567,36 @@ def print_algorithm_list():
                 flags.append('[!] weak')
             nsa_entry = nsa.get(algo_type, {}).get(name)
             if nsa_entry:
-                flags.append(f'[!] nsa ({nsa_entry["risk"].lower()})')
+                risk = nsa_entry["risk"].lower()
+                sev = 'x' if risk in ('high', 'critical') else '~'
+                flags.append(f'[{sev}] NSA {risk}')
             flag_str = ('  ' + '  '.join(flags)) if flags else ''
             print(f"    {name:<52}{flag_str}")
         print()
+
+
+def print_legend():
+    """Print the output marker legend (Schema B: presence + severity)."""
+    print("Output markers  [<presence><severity>]:\n")
+    print("  Presence (1st char):")
+    print("    +    offered by the server")
+    print("    -    not offered")
+    print()
+    print("  Severity (2nd char, only when offered):")
+    print("    (space)  no known weakness            green")
+    print("    !        weak / deprecated            yellow")
+    print("    ~        NSA-suspicious, medium risk  yellow")
+    print("    x        NSA-suspicious, high risk    red")
+    print()
+    print("  Examples:")
+    print("    [+ ]  offered, unproblematic")
+    print("    [+!]  offered, weak")
+    print("    [+~]  offered, NSA medium risk")
+    print("    [+x]  offered, NSA high risk")
+    print("    [- ]  not offered")
+    print()
+    print("  Lines without a marker (Banner, Security Score, Compliance, Scan")
+    print("  time) are status/summary output, not per-algorithm results.")
 
 
 def main():
@@ -2576,9 +2656,14 @@ Examples:
                         help='Prefer IPv6 (AAAA) addresses when a host resolves to both A and AAAA records')
     parser.add_argument('--ipv6-only', action='store_true',
                         help='Scan only via IPv6; skip hosts that have no AAAA record')
-    parser.add_argument('--fast', action='store_true',
-                        help='Fast mode: read the server KEXINIT in one connection instead of probing each algorithm '
-                             '(falls back to probing behind a proxy/jump-host)')
+    # Scan mode: fast KEXINIT read (default) vs. per-algorithm probing.
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument('--fast', action='store_true',
+                            help='Read the server KEXINIT in one connection (default). Client-independent; '
+                                 'auto-falls back to probing behind a proxy/jump-host')
+    mode_group.add_argument('--probe', action='store_true',
+                            help='Force per-algorithm probing via the local ssh client instead of the default '
+                                 'KEXINIT read (for proxies/debugging; results depend on the local client)')
 
     # Algorithm testing
     parser.add_argument('--explicit', '-e', metavar='ALGOS',
@@ -2594,6 +2679,8 @@ Examples:
                         help='List available --filter tokens')
     parser.add_argument('--list-algorithms', action='store_true',
                         help='List all scannable algorithms grouped by type, with weak/NSA annotations')
+    parser.add_argument('--legend', action='store_true',
+                        help='Explain the output markers (Schema B) and exit')
     parser.add_argument('--no-nsa-warnings', action='store_true',
                         help='Suppress NSA risk annotations in live output and summary (analysis still runs; NSA data included in exports)')
 
@@ -2639,11 +2726,11 @@ Examples:
     if args.list_filter:
         print("Available --filter tokens:\n")
         print("  Category filters (filter by security classification):")
-        print(f"  {'supported':<16} Supported algorithms with no warning  [x]")
-        print(f"  {'unsupported':<16} Algorithms the server does not support  [-]")
-        print(f"  {'flagged':<16} All flagged algorithms (weak + NSA combined)  [!]")
-        print(f"  {'weak':<16} Weak/deprecated algorithms only  [!]")
-        print(f"  {'nsa':<16} NSA-suspicious algorithms only  [!]")
+        print(f"  {'supported':<16} Supported algorithms with no warning  [+ ]")
+        print(f"  {'unsupported':<16} Algorithms the server does not support  [- ]")
+        print(f"  {'flagged':<16} All flagged algorithms (weak + NSA combined)  [+!]/[+~]/[+x]")
+        print(f"  {'weak':<16} Weak/deprecated algorithms only  [+!]")
+        print(f"  {'nsa':<16} NSA-suspicious algorithms only  [+~]/[+x]")
         print()
         print("  Type filters (filter by protocol layer):")
         print(f"  {'cipher':<16} Cipher / encryption algorithms only")
@@ -2678,6 +2765,11 @@ Examples:
     # --list-algorithms: no scanner needed
     if args.list_algorithms:
         print_algorithm_list()
+        return 0
+
+    # --legend: no scanner needed
+    if args.legend:
+        print_legend()
         return 0
 
     # Load config file: --config wins, otherwise auto-discover default locations
@@ -2720,7 +2812,10 @@ Examples:
         config['scanner']['jump_host'] = args.jump_host
     if args.proxy_command is not None:
         config['scanner']['proxy_command'] = args.proxy_command
-    if args.fast:
+    # Scan mode: KEXINIT read is the default; --probe forces per-algorithm probing.
+    if args.probe:
+        config['scanner']['fast'] = False
+    elif args.fast:
         config['scanner']['fast'] = True
 
     if args.compliance:
@@ -2795,8 +2890,7 @@ Examples:
                 if scanner.summary_only:
                     return
                 parts = [f"{scanner.max_workers} threads", f"{scanner.timeout}s timeout"]
-                if scanner.fast_mode:
-                    parts.append("fast (KEXINIT)")
+                parts.append("fast (KEXINIT)" if scanner.fast_mode else "probe (per-algorithm)")
                 if scanner.banner_timeout is not None:
                     parts.append(f"banner-timeout {scanner.banner_timeout}s")
                 if scanner.rate_limit:

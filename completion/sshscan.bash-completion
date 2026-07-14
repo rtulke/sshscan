@@ -26,11 +26,14 @@ _sshscan() {
            --proxy-command
            --prefer-ipv6
            --ipv6-only
+           --fast
+           --probe
         -e --explicit
            --compliance
            --list-frameworks
            --list-filter
            --list-algorithms
+           --legend
            --no-nsa-warnings
            --format
         -o --output

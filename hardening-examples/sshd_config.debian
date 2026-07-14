@@ -48,11 +48,14 @@ Ciphers           chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gc
 # MACs: ETM (encrypt-then-MAC) only
 MACs              hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
 
-# KEX: PQC hybrid + Curve25519; NIST ecdh variants intentionally omitted
-KexAlgorithms     mlkem768x25519-sha256,sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
+# KEX: PQC hybrid + Curve25519; NIST ecdh variants intentionally omitted.
+# Debian 12 / Ubuntu 22.04–24.04 ship OpenSSH 9.2–9.6 (no ML-KEM), so sntrup761x25519 is the
+# post-quantum hybrid here. On OpenSSH 9.9+, prepend "mlkem768x25519-sha256," for ML-KEM.
+KexAlgorithms     sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
 
-# Host key: Ed25519 only; no RSA, no ECDSA (NIST P-curves)
-HostKeyAlgorithms ssh-ed25519,sk-ssh-ed25519@openssh.com
+# Host key: Ed25519 only; no RSA, no ECDSA (NIST P-curves). No sk-* — FIDO types are user-auth,
+# not server host keys.
+HostKeyAlgorithms ssh-ed25519,ssh-ed25519-cert-v01@openssh.com
 
 # ── Authentication ────────────────────────────────────────────────────────────
 # These lines explicitly override cloud-init's PasswordAuthentication yes

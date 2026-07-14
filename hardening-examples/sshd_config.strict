@@ -5,9 +5,9 @@
 # servers, bastion hosts, or any system where security outweighs convenience.
 #
 # Requirements:
-#   OpenSSH >= 8.5   for sntrup761x25519-sha512 (PQC fallback)
+#   OpenSSH >= 8.5   for sntrup761x25519-sha512 (post-quantum hybrid; shipped by default here)
 #   OpenSSH >= 9.2   for ChannelTimeout / UnusedConnectionTimeout
-#   OpenSSH >= 9.9   for mlkem768x25519-sha256 (IETF ML-KEM / FIPS 203)
+#   OpenSSH >= 9.9   optional: mlkem768x25519-sha256 (ML-KEM / FIPS 203) — prepend to KexAlgorithms
 #
 # Before applying:
 #   1. Confirm key-based login works in a second terminal — keep it open.
@@ -35,18 +35,20 @@ ListenAddress ::
 HostKey /etc/ssh/ssh_host_ed25519_key
 
 # ── Cryptographic algorithms ──────────────────────────────────────────────────
-# Ciphers: ChaCha20-Poly1305 only — fastest AEAD, no hardware acceleration needed
+# Ciphers: ChaCha20-Poly1305 preferred (no AES hardware needed), AES-256-GCM as fallback
 Ciphers           chacha20-poly1305@openssh.com,aes256-gcm@openssh.com
 
 # MACs: SHA-512 ETM only
 MACs              hmac-sha2-512-etm@openssh.com
 
-# KEX: Post-quantum hybrid first, Curve25519 as fallback; no NIST P-curves
-# mlkem768x25519-sha256 requires OpenSSH 9.9 — remove if running an older version
-KexAlgorithms     mlkem768x25519-sha256,sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
+# KEX: Post-quantum hybrid first, Curve25519 as fallback; no NIST P-curves.
+# sntrup761x25519 works on OpenSSH 8.5+ (shipped here). On OpenSSH 9.9+, prepend
+# "mlkem768x25519-sha256," as the first entry for IETF ML-KEM (FIPS 203).
+KexAlgorithms     sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
 
-# Host key algorithm: Ed25519 only (sk- variant for FIDO2-backed host keys)
-HostKeyAlgorithms ssh-ed25519,sk-ssh-ed25519@openssh.com
+# Host key algorithm: Ed25519 only (plus its certificate variant for the CA layer).
+# sk-* is NOT valid here — FIDO/security-key types are user-auth keys, not server host keys.
+HostKeyAlgorithms ssh-ed25519,ssh-ed25519-cert-v01@openssh.com
 
 # ── Authentication ────────────────────────────────────────────────────────────
 PermitRootLogin              no

@@ -4,7 +4,105 @@ All notable changes to SSH Algorithm Security Scanner are documented here.
 
 ---
 
-## [3.6.4] — Current
+## [3.7.0] — Current
+
+Fast (KEXINIT) scan mode is now the default; major probe-mode correctness fixes;
+new Schema B output markers; new --probe and --legend flags. Full README refresh,
+SSH hardening-guide/profile corrections, and a new single-file sshd hardening wizard.
+
+### New Features
+
+sshscan.py:
+    - Fast mode (single-connection KEXINIT read) is now the DEFAULT scan mode
+    - Added --probe to force per-algorithm probing (mutually exclusive with --fast;
+      probing is still used automatically behind a jump-host/proxy)
+    - Added --legend to print the output-marker reference and exit
+    - New Schema B output markers [<presence><severity>]: [+ ] ok, [+!] weak,
+      [+~] NSA medium risk, [+x] NSA high risk, [- ] not offered
+    - Status lines (Banner, Security Score, Compliance, Scan time) now carry no
+      marker and are set apart from the results by a blank line
+README.md:
+    - New "Scan Modes" and "Output Markers" sections
+completion/sshscan.bash-completion:
+    - Added --fast, --probe and --legend
+
+### Fixes
+
+sshscan.py:
+    - Probe mode reported every UNSUPPORTED algorithm as "supported": LogLevel=ERROR
+      suppressed OpenSSH's "no matching <type> found" line (emitted at INFO level).
+      Changed the probe to LogLevel=INFO
+    - MAC probing reported every MAC as supported, because the default cipher order
+      prefers AEAD ciphers (GCM, chacha20-poly1305), which make the MAC name-list
+      irrelevant. MAC probes now pin non-AEAD ciphers so the MAC decides the negotiation
+    - Client-unknown KEX algorithms (e.g. mlkem768x25519-sha256 on an older client) were
+      misreported as supported: added "bad ssh2 kexalgorithms" and "unsupported kex
+      algorithm" to the rejection patterns
+    - KEXINIT parsing now drops protocol pseudo-markers (ext-info-*, kex-strict-*), which
+      are not selectable algorithms and were being listed and scored
+    - Probes now pass -F none and ControlMaster=no / ControlPath=none / ControlPersist=no
+      to isolate each test from the local ssh_config and from connection multiplexing
+    - Same connection isolation applied to the banner-over-SSH path (_scan_banner_via_ssh)
+
+### Changes
+
+sshscan.py / sshscan.conf:
+    - config key `fast` now defaults to yes
+    - NIST compliance profile now requires curve25519-sha256 / ssh-ed25519 (NIST-approved
+      via SP 800-186 / FIPS 186-5) instead of the NIST P-curves; previously the NSA-risk
+      score penalty on the P-curves made the NIST minimum score structurally unreachable
+    - --list-algorithms and --list-filter output aligned to the Schema B markers
+README.md:
+    - Corrected compliance minimum scores (NIST 80, ANSSI 95); documented fast/probe
+      modes, Schema B markers, and the client-version implications
+
+### Documentation & hardening examples
+
+hardening-examples/sshd_hardening_wizard.py (NEW):
+    - Single-file, dependency-free interactive wizard that generates a hardened OpenSSH
+      configuration matched to a chosen distribution/release or an auto-detected OpenSSH
+      version (ssh -V). Every algorithm choice is gated on the resolved version, so the
+      output always passes sshd -t. Prompts go to stderr, config to stdout (safe to
+      redirect with > / >>). Flags: --distro/--release/--openssh/--detect/--profile/
+      --format {crypto,dropin,full}/--allow-users/--port/--with-sftp/--no-sftp/
+      --non-interactive/--list-distros. Covers Ubuntu, Debian, RHEL/Rocky/Alma, Fedora,
+      SLES, openSUSE (current + last 3 releases) plus Debian/RHEL/SUSE path & service
+      differences and a RHEL/Fedora crypto-policies note.
+
+hardening-examples/ssh_hardening_guide.md:
+    - Fix: removed sk-ssh-ed25519@openssh.com from server HostKeyAlgorithms — FIDO
+      security-key types are user-auth keys, not server host keys (crypto section, sshd
+      template, and system-wide client config)
+    - Fix: correct FIDO key-type names (generation types ed25519-sk / ecdsa-sk; algorithm
+      names sk-ssh-ed25519@openssh.com / sk-ecdsa-sha2-nistp256@openssh.com)
+    - Fix: certificate expiry flag typo (--V -> -V)
+    - Change: mlkem768x25519-sha256 no longer shipped by default (it breaks sshd -t on
+      OpenSSH < 9.9, i.e. current Debian/Ubuntu/RHEL). sntrup761x25519 is the default PQ
+      hybrid; mlkem is documented as a 9.9+ prepend
+    - Add: MAC-with-AEAD note, Ed25519-only host-key compatibility caveat, minimal
+      fail2ban jail.local guidance and a systemd-backend note
+    - Add: "Recommended: generate a config with the wizard" block including a self-test
+
+hardening-examples/sshd_config.strict, sshd_config.balanced, sshd_config.debian:
+    - Fix: removed sk-ssh-ed25519@openssh.com from HostKeyAlgorithms in all three profiles
+    - Change: mlkem768x25519-sha256 no longer shipped by default (9.9+ opt-in)
+    - balanced: NIST P-curve ECDSA host-key fallback replaced with RSA-SHA2 — a broader,
+      non-NIST compatibility fallback (HostKey, HostKeyAlgorithms, apply + migration steps)
+    - strict: Ciphers comment corrected to match the shipped two-cipher list
+
+README.md (hardening + framing):
+    - Intro reframed (KEXINIT read is the default; --probe wraps the local ssh binary)
+    - Client-version note rewritten (fast mode is client-independent; only --probe depends
+      on the local OpenSSH)
+    - --fast documented as the default; --probe and --legend added to the tables
+    - "Balanced" hardening framework claim corrected (targets NIST; stricter frameworks
+      forbid/penalise the NIST P-curves)
+    - Filter category-token markers updated to Schema B; first-line grammar fix
+    - Linked sshd_hardening_wizard.py from the Hardening Guide section
+
+---
+
+## [3.6.4]
 
 Improve IPv6 support: fix validation, add --prefer-ipv6 / --ipv6-only
 

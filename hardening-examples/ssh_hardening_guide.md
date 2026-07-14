@@ -161,9 +161,11 @@ to protect the private key at rest.
 
 ### FIDO2 / Hardware Security Keys
 
-OpenSSH 8.2+ supports FIDO2/U2F hardware security keys (YubiKey, Nitrokey, SoloKey, etc.)
-as key types `sk-ed25519` and `sk-ecdsa-sk`. Every authentication operation requires a
-physical touch or PIN verification on the device.
+OpenSSH 8.2+ supports FIDO2/U2F hardware security keys (YubiKey, Nitrokey, SoloKey, etc.).
+Generate them with `ssh-keygen -t ed25519-sk` (preferred) or `-t ecdsa-sk`; the resulting
+public-key algorithm names are `sk-ssh-ed25519@openssh.com` and
+`sk-ecdsa-sha2-nistp256@openssh.com`. Every authentication operation requires a physical touch
+or PIN verification on the device.
 
 **Generate a FIDO2-backed key:**
 
@@ -291,14 +293,22 @@ Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.
 # MACs: Encrypt-then-MAC only (ETM suffix); prevents CBC padding oracle attacks
 MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
 
-# Key exchange: Curve25519 + post-quantum hybrid
-# OpenSSH >= 9.9: mlkem768x25519-sha256 (IETF ML-KEM / FIPS 203)
-# OpenSSH 8.5–9.8: sntrup761x25519-sha512@openssh.com (NTRU Prime hybrid)
-KexAlgorithms mlkem768x25519-sha256,sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
+# Key exchange: Curve25519 + post-quantum hybrid.
+# sntrup761x25519-sha512@openssh.com (NTRU Prime) works on OpenSSH 8.5+ and is shipped here,
+# so this validates on current Debian/Ubuntu (OpenSSH 9.2–9.6).
+# On OpenSSH >= 9.9, prepend "mlkem768x25519-sha256," for IETF ML-KEM (FIPS 203).
+KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
 
-# Host key algorithms: Ed25519 only (includes FIDO2-backed sk variant)
-HostKeyAlgorithms ssh-ed25519,sk-ssh-ed25519@openssh.com
+# Host key algorithms: Ed25519 only (plus its certificate variant for the CA layer).
+# Do NOT list sk-* here — FIDO/security-key types are for user authentication, not server
+# host keys; a server cannot present a FIDO-backed host key.
+HostKeyAlgorithms ssh-ed25519,ssh-ed25519-cert-v01@openssh.com
 ```
+
+> **MACs and AEAD ciphers:** When an AEAD cipher (AES-GCM, ChaCha20-Poly1305) is negotiated,
+> the transport uses the cipher's built-in integrity and the separate `MACs` list is not used
+> at all. With the AEAD-only `Ciphers` line above, the `MACs` setting therefore only takes
+> effect if a non-AEAD cipher is ever negotiated — keep it as defense in depth.
 
 Verify what sshd will actually negotiate after restart:
 
@@ -355,6 +365,12 @@ sudo ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key -N ""
 sudo chmod 600 /etc/ssh/ssh_host_ed25519_key
 sudo chmod 644 /etc/ssh/ssh_host_ed25519_key.pub
 ```
+
+> **Compatibility:** Keeping only the Ed25519 host key rejects clients that cannot verify
+> Ed25519 (OpenSSH < 6.5 and some network appliances / older Java SSH libraries). If you must
+> support such clients, keep `ssh_host_rsa_key` as well and add `rsa-sha2-512,rsa-sha2-256` to
+> `HostKeyAlgorithms` — RSA with SHA-2 signatures is still acceptable; only the SHA-1 `ssh-rsa`
+> signature algorithm is deprecated.
 
 Explicitly declare the host key in `sshd_config`:
 
@@ -499,6 +515,28 @@ later entries override earlier ones for most directives.
 
 ### Complete Hardened sshd_config Template
 
+> **Recommended: generate a config matched to your OpenSSH version.**
+> `sshd_hardening_wizard.py` (in `hardening-examples/`) emits only the algorithms your target
+> OpenSSH version actually supports, so the output always passes `sshd -t` — no "remove this
+> line on older versions" caveats. Prompts go to stderr and the config to stdout, so it is safe
+> to redirect.
+>
+> ```bash
+> # Interactive: auto-detect or pick distro/release, then profile + output format
+> python3 hardening-examples/sshd_hardening_wizard.py > 99-hardening.conf
+>
+> # List supported distributions and the OpenSSH version each maps to
+> python3 hardening-examples/sshd_hardening_wizard.py --list-distros
+>
+> # Self-test: generate for THIS host's OpenSSH version and validate it locally
+> python3 hardening-examples/sshd_hardening_wizard.py \
+>     --detect --profile balanced --format full --allow-users test --non-interactive \
+>     | sudo sshd -t -f /dev/stdin && echo "generated config is valid"
+> ```
+>
+> `sshd -t` validates against the *local* sshd's algorithm support, so a config generated for a
+> newer OpenSSH version must be validated on a host actually running that version.
+
 > **Ready-to-use profile files** are included in this repository for three common scenarios:
 >
 > | File | Use case |
@@ -528,8 +566,9 @@ HostKey /etc/ssh/ssh_host_ed25519_key
 # ── Cryptographic algorithms ──────────────────────────────────────────────────
 Ciphers          chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
 MACs             hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
-KexAlgorithms    mlkem768x25519-sha256,sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
-HostKeyAlgorithms ssh-ed25519,sk-ssh-ed25519@openssh.com
+# KexAlgorithms: sntrup761x25519 works on OpenSSH 8.5+; on 9.9+ prepend mlkem768x25519-sha256,
+KexAlgorithms    sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
+HostKeyAlgorithms ssh-ed25519,ssh-ed25519-cert-v01@openssh.com
 
 # ── Authentication ─────────────────────────────────────────────────────────────
 PermitRootLogin              no
@@ -809,7 +848,7 @@ shared accounts). Only certificates with a matching principal are accepted.
 |---|---|---|
 | Deployment | Per-server, per-user | Sign once, trusted everywhere |
 | Revocation | Remove from every server | Add to `RevokedKeys` file |
-| Expiry | No built-in expiry | `--V` flag; short-lived certs possible |
+| Expiry | No built-in expiry | `-V` flag; short-lived certs possible |
 | Audit | No identity on key | Certificate identity logged |
 | Bastion-less | Need authorized_keys on all hosts | One CA public key on all hosts |
 
@@ -966,10 +1005,11 @@ Host *
   IdentitiesOnly yes
   IdentityFile ~/.ssh/id_ed25519
 
-  # Modern algorithms only — mirror the server-side restrictions
+  # Modern algorithms only — mirror the server-side restrictions.
+  # (OpenSSH 9.9+ clients: prepend mlkem768x25519-sha256, to the KexAlgorithms line.)
   Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
   MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
-  KexAlgorithms mlkem768x25519-sha256,curve25519-sha256,curve25519-sha256@libssh.org
+  KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
 
   # Host key verification
   StrictHostKeyChecking accept-new  # accept on first connect, reject changed keys
@@ -1024,11 +1064,12 @@ Harden `/etc/ssh/ssh_config` to match the per-user config:
 # /etc/ssh/ssh_config — system-wide SSH client hardening
 
 Host *
-    # Algorithm restrictions (same as ~/.ssh/config)
+    # Algorithm restrictions (same as ~/.ssh/config).
+    # (OpenSSH 9.9+: prepend mlkem768x25519-sha256, to KexAlgorithms.)
     Ciphers          chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
     MACs             hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
-    KexAlgorithms    mlkem768x25519-sha256,sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
-    HostKeyAlgorithms ssh-ed25519,sk-ssh-ed25519@openssh.com
+    KexAlgorithms    sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
+    HostKeyAlgorithms ssh-ed25519,ssh-ed25519-cert-v01@openssh.com
 
     # Host key verification
     StrictHostKeyChecking accept-new
@@ -1130,11 +1171,9 @@ sudo systemctl enable --now fail2ban
 
 ### Configuration
 
-Never edit `jail.conf` directly — it is overwritten on package upgrades. Use a local override:
-
-```bash
-sudo cp /etc/fail2ban/jail.conf /etc/fail2ban/jail.local
-```
+Never edit `jail.conf` directly — it is overwritten on package upgrades. Create a **minimal**
+`/etc/fail2ban/jail.local` containing only the settings you override — this is preferred over
+copying the whole `jail.conf`, which masks upstream default changes on upgrade.
 
 Configure the `[sshd]` jail in `jail.local`:
 
@@ -1157,6 +1196,9 @@ maxretry = 5                  # failures before ban
 findtime = 600                # observation window in seconds (10 min)
 bantime  = 3600               # initial ban duration in seconds (1 hour)
 ```
+
+> **Journal-only systems:** On hosts where sshd logs only to the systemd journal (no
+> `/var/log/auth.log`), set `backend = systemd` in the `[sshd]` jail and omit `logpath`.
 
 | Directive         | Description                                              |
 |-------------------|----------------------------------------------------------|
