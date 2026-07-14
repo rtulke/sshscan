@@ -43,7 +43,8 @@ jobs:
       - name: Run test suite
         run: python -m unittest discover -s tests
 
-      # --strip is Linux-only (it can break the signature on macOS).
+      # Do not drop --strip: it is what takes the Linux binary from 21.9 MB to
+      # 8.6 MB (debug symbols). Linux-only -- on macOS it can break the signature.
       # No UPX on purpose: UPX-packed executables trip AV/EDR heuristics, which
       # is the wrong kind of attention for a security tool.
       - name: Build binary
@@ -64,23 +65,25 @@ jobs:
       # Ship archives, not bare binaries: tar/zip carry the executable bit, a
       # browser download of a raw binary does not. Checksums cover the archives,
       # i.e. what people actually download.
+      # tar.gz only, no zip: measured on 3.7.2, gzip buys ~2% (PyInstaller already
+      # compresses its archive internally). The archive is here for the executable
+      # bit and the clean `sshscan` name, not for the bytes -- a zip would add a
+      # third identical-sized asset per platform for nothing.
       - name: Package
         run: |
           mkdir -p out
           cp dist/sshscan sshscan
           chmod +x sshscan
           tar -czf "out/sshscan-${{ matrix.target }}.tar.gz" sshscan
-          zip -q   "out/sshscan-${{ matrix.target }}.zip"    sshscan
           cd out
           shasum -a 256 "sshscan-${{ matrix.target }}.tar.gz" \
-                        "sshscan-${{ matrix.target }}.zip" \
                         > "SHA256SUMS-${{ matrix.target }}"
 
       - name: Sizes
         run: |
-          echo "::notice title=Size ${{ matrix.target }}::$(du -h dist/sshscan | cut -f1) raw / $(du -h out/sshscan-${{ matrix.target }}.tar.gz | cut -f1) tar.gz / $(du -h out/sshscan-${{ matrix.target }}.zip | cut -f1) zip"
+          echo "::notice title=Size ${{ matrix.target }}::$(du -h dist/sshscan | cut -f1) raw / $(du -h out/sshscan-${{ matrix.target }}.tar.gz | cut -f1) tar.gz"
           echo "--- raw binary ---"; ls -lh dist/sshscan
-          echo "--- archives ---";   ls -lh out/
+          echo "--- archive ---";    ls -lh out/
 
       - uses: actions/upload-artifact@v7
         with:
@@ -132,23 +135,25 @@ jobs:
           ./dist/sshscan --list-frameworks  > /dev/null
           ./dist/sshscan --list-filter      > /dev/null
 
+      # tar.gz only, no zip: measured on 3.7.2, gzip buys ~2% (PyInstaller already
+      # compresses its archive internally). The archive is here for the executable
+      # bit and the clean `sshscan` name, not for the bytes -- a zip would add a
+      # third identical-sized asset per platform for nothing.
       - name: Package
         run: |
           mkdir -p out
           cp dist/sshscan sshscan
           chmod +x sshscan
           tar -czf "out/sshscan-${{ matrix.target }}.tar.gz" sshscan
-          zip -q   "out/sshscan-${{ matrix.target }}.zip"    sshscan
           cd out
           shasum -a 256 "sshscan-${{ matrix.target }}.tar.gz" \
-                        "sshscan-${{ matrix.target }}.zip" \
                         > "SHA256SUMS-${{ matrix.target }}"
 
       - name: Sizes
         run: |
-          echo "::notice title=Size ${{ matrix.target }}::$(du -h dist/sshscan | cut -f1) raw / $(du -h out/sshscan-${{ matrix.target }}.tar.gz | cut -f1) tar.gz / $(du -h out/sshscan-${{ matrix.target }}.zip | cut -f1) zip"
+          echo "::notice title=Size ${{ matrix.target }}::$(du -h dist/sshscan | cut -f1) raw / $(du -h out/sshscan-${{ matrix.target }}.tar.gz | cut -f1) tar.gz"
           echo "--- raw binary ---"; ls -lh dist/sshscan
-          echo "--- archives ---";   ls -lh out/
+          echo "--- archive ---";    ls -lh out/
 
       - uses: actions/upload-artifact@v7
         with:
