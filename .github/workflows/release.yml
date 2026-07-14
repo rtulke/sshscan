@@ -79,8 +79,14 @@ jobs:
       #   sshscan-bin  -- the PyInstaller binary, no Python needed (~8.4 MB)
       # Both install /usr/bin/sshscan, so they declare Conflicts/Provides on
       # each other (see packaging/*.yaml).
+      # `go install` drops the binary in $HOME/go/bin, which is NOT on the
+      # runner's PATH -- without the GITHUB_PATH line this step still succeeds
+      # and the *next* one dies with "nfpm: command not found".
       - name: Install nfpm
-        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+          "$HOME/go/bin/nfpm" --version
 
       - name: Build deb + rpm
         env:
