@@ -1,0 +1,61 @@
+# Native package: ships sshscan.py and leans on the distro's Python + PyYAML.
+# The small, distro-idiomatic variant. Conflicts with sshscan-bin, which puts
+# a different file at the same path.
+#
+# Built by .github/workflows/release.yml via nfpm. Arch/version come from env.
+name: sshscan
+arch: ${PKG_ARCH}
+platform: linux
+version: ${PKG_VERSION}
+section: net
+priority: optional
+maintainer: Robert Tulke <rt@debian.sh>
+description: |
+  SSH algorithm security scanner.
+  Scans SSH servers for supported ciphers, MACs, key exchange and host key
+  algorithms, flags weak and NSA-suspicious choices, and checks the result
+  against compliance frameworks (NIST, FIPS 140-2, BSI TR-02102, ANSSI).
+  This package runs the Python script and needs a system Python.
+vendor: Robert Tulke
+homepage: https://github.com/rtulke/sshscan
+license: MIT
+
+provides:
+  - sshscan
+conflicts:
+  - sshscan-bin
+replaces:
+  - sshscan-bin
+
+# The scanner shells out to the ssh(1) client -- without it the tool is useless.
+# The client package is named differently per ecosystem, hence the overrides.
+overrides:
+  deb:
+    depends:
+      - python3 (>= 3.8)
+      - python3-yaml
+      - openssh-client
+  rpm:
+    depends:
+      - python3 >= 3.8
+      - python3-pyyaml
+      - openssh-clients
+
+contents:
+  - src: ./dist/sshscan-script
+    dst: /usr/bin/sshscan
+    file_info:
+      mode: 0755
+
+  - src: ./sshscan.conf
+    dst: /etc/sshscan/sshscan.conf
+    type: config|noreplace
+
+  - src: ./completion/sshscan.bash-completion
+    dst: /usr/share/bash-completion/completions/sshscan
+
+  - src: ./LICENSE
+    dst: /usr/share/doc/sshscan/LICENSE
+
+  - src: ./README.md
+    dst: /usr/share/doc/sshscan/README.md

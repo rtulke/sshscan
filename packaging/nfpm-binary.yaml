@@ -1,0 +1,58 @@
+# Self-contained package: ships the PyInstaller binary, no Python needed.
+# The exact artifact that went through the smoke tests and the Debian/RPM
+# container verification. Conflicts with sshscan, which puts a different file
+# at the same path.
+#
+# Built by .github/workflows/release.yml via nfpm. Arch/version come from env.
+name: sshscan-bin
+arch: ${PKG_ARCH}
+platform: linux
+version: ${PKG_VERSION}
+section: net
+priority: optional
+maintainer: Robert Tulke <rt@debian.sh>
+description: |
+  SSH algorithm security scanner (self-contained binary).
+  Scans SSH servers for supported ciphers, MACs, key exchange and host key
+  algorithms, flags weak and NSA-suspicious choices, and checks the result
+  against compliance frameworks (NIST, FIPS 140-2, BSI TR-02102, ANSSI).
+  This package bundles its own Python runtime and needs no system Python.
+vendor: Robert Tulke
+homepage: https://github.com/rtulke/sshscan
+license: MIT
+
+provides:
+  - sshscan
+conflicts:
+  - sshscan
+replaces:
+  - sshscan
+
+# No Python dependency -- the interpreter is inside the binary. The ssh(1)
+# client is still required: the scanner shells out to it by design.
+overrides:
+  deb:
+    depends:
+      - openssh-client
+  rpm:
+    depends:
+      - openssh-clients
+
+contents:
+  - src: ./dist/sshscan
+    dst: /usr/bin/sshscan
+    file_info:
+      mode: 0755
+
+  - src: ./sshscan.conf
+    dst: /etc/sshscan/sshscan.conf
+    type: config|noreplace
+
+  - src: ./completion/sshscan.bash-completion
+    dst: /usr/share/bash-completion/completions/sshscan
+
+  - src: ./LICENSE
+    dst: /usr/share/doc/sshscan-bin/LICENSE
+
+  - src: ./README.md
+    dst: /usr/share/doc/sshscan-bin/README.md

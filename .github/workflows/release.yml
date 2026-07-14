@@ -11,9 +11,9 @@ permissions:
   contents: read
 
 jobs:
-  # Linux and macOS are separate jobs, not one matrix: verify-debian only needs
-  # the Linux binary, and a single `needs:` on a combined matrix would make it
-  # wait for the macOS build too. needs: works per job, not per matrix entry.
+  # Linux and macOS are separate jobs, not one matrix: the verify jobs only need
+  # the Linux artifacts, and a single `needs:` on a combined matrix would make
+  # them wait for the macOS build too. needs: works per job, not per matrix entry.
   build-linux:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -25,8 +25,10 @@ jobs:
           # also runs on Debian 12 (2.36) and 13 (2.41). The reverse is not true.
           - os: ubuntu-22.04
             target: linux-x86_64
+            pkgarch: amd64      # nfpm maps this to deb:amd64 / rpm:x86_64
           - os: ubuntu-22.04-arm
             target: linux-arm64
+            pkgarch: arm64      # nfpm maps this to deb:arm64 / rpm:aarch64
 
     steps:
       - uses: actions/checkout@v7
@@ -62,28 +64,58 @@ jobs:
           ./dist/sshscan --list-frameworks  > /dev/null
           ./dist/sshscan --list-filter      > /dev/null
 
-      # Ship archives, not bare binaries: tar/zip carry the executable bit, a
-      # browser download of a raw binary does not. Checksums cover the archives,
-      # i.e. what people actually download.
       # tar.gz only, no zip: measured on 3.7.2, gzip buys ~2% (PyInstaller already
       # compresses its archive internally). The archive is here for the executable
-      # bit and the clean `sshscan` name, not for the bytes -- a zip would add a
-      # third identical-sized asset per platform for nothing.
-      - name: Package
+      # bit and the clean `sshscan` name, not for the bytes.
+      - name: Package tarball
         run: |
           mkdir -p out
           cp dist/sshscan sshscan
           chmod +x sshscan
           tar -czf "out/sshscan-${{ matrix.target }}.tar.gz" sshscan
+
+      # Two package flavours, user picks:
+      #   sshscan      -- the .py script, uses the distro's python3 + PyYAML (~50 KB)
+      #   sshscan-bin  -- the PyInstaller binary, no Python needed (~8.4 MB)
+      # Both install /usr/bin/sshscan, so they declare Conflicts/Provides on
+      # each other (see packaging/*.yaml).
+      - name: Install nfpm
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+
+      - name: Build deb + rpm
+        env:
+          PKG_ARCH: ${{ matrix.pkgarch }}
+        run: |
+          set -eux
+          # Version comes from the single source of truth, so it is right for
+          # both tag pushes and manual runs.
+          PKG_VERSION=$(python3 -c "import re;print(re.search(r\"__version__\s*=\s*'([^']+)'\", open('sshscan.py').read()).group(1))")
+          export PKG_VERSION
+          echo "Packaging sshscan $PKG_VERSION ($PKG_ARCH)"
+
+          # /usr/bin/sshscan for the script flavour -- sshscan.py already carries
+          # the #!/usr/bin/env python3 shebang.
+          cp sshscan.py dist/sshscan-script
+          chmod +x dist/sshscan-script
+
+          for cfg in packaging/nfpm-python.yaml packaging/nfpm-binary.yaml; do
+            for fmt in deb rpm; do
+              nfpm package -f "$cfg" -p "$fmt" -t out/
+            done
+          done
+          ls -lh out/
+
+      - name: Checksums
+        run: |
           cd out
-          shasum -a 256 "sshscan-${{ matrix.target }}.tar.gz" \
-                        > "SHA256SUMS-${{ matrix.target }}"
+          shasum -a 256 * > "../SHA256SUMS-${{ matrix.target }}"
+          mv "../SHA256SUMS-${{ matrix.target }}" .
+          cat "SHA256SUMS-${{ matrix.target }}"
 
       - name: Sizes
         run: |
-          echo "::notice title=Size ${{ matrix.target }}::$(du -h dist/sshscan | cut -f1) raw / $(du -h out/sshscan-${{ matrix.target }}.tar.gz | cut -f1) tar.gz"
-          echo "--- raw binary ---"; ls -lh dist/sshscan
-          echo "--- archive ---";    ls -lh out/
+          echo "::notice title=Size ${{ matrix.target }}::$(du -h dist/sshscan | cut -f1) raw binary / $(du -h out/sshscan-${{ matrix.target }}.tar.gz | cut -f1) tar.gz"
+          ls -lh out/
 
       - uses: actions/upload-artifact@v7
         with:
@@ -135,25 +167,19 @@ jobs:
           ./dist/sshscan --list-frameworks  > /dev/null
           ./dist/sshscan --list-filter      > /dev/null
 
-      # tar.gz only, no zip: measured on 3.7.2, gzip buys ~2% (PyInstaller already
-      # compresses its archive internally). The archive is here for the executable
-      # bit and the clean `sshscan` name, not for the bytes -- a zip would add a
-      # third identical-sized asset per platform for nothing.
-      - name: Package
+      - name: Package tarball
         run: |
           mkdir -p out
           cp dist/sshscan sshscan
           chmod +x sshscan
           tar -czf "out/sshscan-${{ matrix.target }}.tar.gz" sshscan
           cd out
-          shasum -a 256 "sshscan-${{ matrix.target }}.tar.gz" \
-                        > "SHA256SUMS-${{ matrix.target }}"
+          shasum -a 256 * > "SHA256SUMS-${{ matrix.target }}"
 
       - name: Sizes
         run: |
-          echo "::notice title=Size ${{ matrix.target }}::$(du -h dist/sshscan | cut -f1) raw / $(du -h out/sshscan-${{ matrix.target }}.tar.gz | cut -f1) tar.gz"
-          echo "--- raw binary ---"; ls -lh dist/sshscan
-          echo "--- archive ---";    ls -lh out/
+          echo "::notice title=Size ${{ matrix.target }}::$(du -h dist/sshscan | cut -f1) raw binary / $(du -h out/sshscan-${{ matrix.target }}.tar.gz | cut -f1) tar.gz"
+          ls -lh out/
 
       - uses: actions/upload-artifact@v7
         with:
@@ -161,11 +187,10 @@ jobs:
           path: out/*
           if-no-files-found: error
 
-  # "Should run on Debian" is not "does run on Debian" -- so run it there.
-  # Unpacking the shipped archive here also proves the archive is intact and
-  # that the executable bit survives the round trip.
-  verify-debian:
-    name: verify ${{ matrix.debian }} / ${{ matrix.target }}
+  # "Should work on Debian" is not "does work on Debian". Installing via apt (not
+  # dpkg -i) is the point: it proves the declared dependencies actually resolve.
+  verify-deb:
+    name: deb ${{ matrix.debian }} / ${{ matrix.target }}
     needs: build-linux
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.debian }}
@@ -191,21 +216,84 @@ jobs:
         with:
           name: sshscan-${{ matrix.target }}
 
-      - name: Verify checksum, unpack, run on a bare Debian
+      - name: Checksums and tarball
         run: |
           set -eux
           ldd --version | head -1
           sha256sum -c "SHA256SUMS-${{ matrix.target }}"
           tar -xzf "sshscan-${{ matrix.target }}.tar.gz"
-          test -x sshscan                      # executable bit survived the archive
+          test -x sshscan                    # executable bit survived the archive
           ./sshscan --version
-          ./sshscan --legend
-          ./sshscan --list-algorithms > /dev/null
-          ./sshscan --list-frameworks > /dev/null
+
+      - name: Install sshscan-bin (self-contained)
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y ./sshscan-bin_*.deb
+          command -v sshscan
+          sshscan --version
+          sshscan --list-frameworks > /dev/null
+          test -f /etc/sshscan/sshscan.conf
+          apt-get remove -y sshscan-bin
+
+      - name: Install sshscan (python script)
+        run: |
+          set -eux
+          apt-get install -y ./sshscan_*.deb
+          command -v sshscan
+          sshscan --version
+          sshscan --list-frameworks > /dev/null
+          test -f /etc/sshscan/sshscan.conf
+          apt-get remove -y sshscan
+
+  # Same idea on the RPM side. dnf install (not rpm -i) so dependency resolution
+  # is actually exercised -- openssh-clients is spelled differently here.
+  verify-rpm:
+    name: rpm ${{ matrix.image }} / ${{ matrix.target }}
+    needs: build-linux
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: rockylinux:9
+            os: ubuntu-22.04
+            target: linux-x86_64
+          - image: fedora:latest
+            os: ubuntu-22.04
+            target: linux-x86_64
+          - image: rockylinux:9
+            os: ubuntu-22.04-arm
+            target: linux-arm64
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: sshscan-${{ matrix.target }}
+
+      - name: Install sshscan-bin (self-contained)
+        run: |
+          set -eux
+          dnf install -y ./sshscan-bin-*.rpm
+          command -v sshscan
+          sshscan --version
+          sshscan --list-frameworks > /dev/null
+          test -f /etc/sshscan/sshscan.conf
+          dnf remove -y sshscan-bin
+
+      - name: Install sshscan (python script)
+        run: |
+          set -eux
+          dnf install -y ./sshscan-[0-9]*.rpm
+          command -v sshscan
+          sshscan --version
+          sshscan --list-frameworks > /dev/null
+          dnf remove -y sshscan
 
   release:
     name: Attach binaries to release
-    needs: [build-linux, build-macos, verify-debian]
+    needs: [build-linux, build-macos, verify-deb, verify-rpm]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -223,7 +311,12 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
              --repo  "$GITHUB_REPOSITORY" \
              --title "$GITHUB_REF_NAME" \
-             --notes "Prebuilt binaries. Unpack the archive for your platform and verify it against SHA256SUMS-<platform> first. The binary needs the system \`ssh\` client." \
+             --notes "Verify downloads against SHA256SUMS-<platform>.
+
+          **Packages** (Linux): \`sshscan\` needs the distro's python3 + PyYAML (~50 KB); \`sshscan-bin\` bundles its own Python (~8.4 MB). They conflict -- install one.
+          **Tarball**: unpack and run; needs no install.
+
+          All variants shell out to the system \`ssh\` client." \
              artifacts/* \
           || gh release upload "$GITHUB_REF_NAME" artifacts/* \
              --repo "$GITHUB_REPOSITORY" --clobber
