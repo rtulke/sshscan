@@ -13,8 +13,7 @@ permissions:
 jobs:
   # Linux and macOS are separate jobs, not one matrix: verify-debian only needs
   # the Linux binary, and a single `needs:` on a combined matrix would make it
-  # wait for the macOS Intel build too (which routinely sits in the queue for
-  # an hour). needs: works per job, not per matrix entry.
+  # wait for the macOS build too. needs: works per job, not per matrix entry.
   build-linux:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -44,8 +43,14 @@ jobs:
       - name: Run test suite
         run: python -m unittest discover -s tests
 
+      # --strip is Linux-only (it can break the signature on macOS).
+      # No UPX on purpose: UPX-packed executables trip AV/EDR heuristics, which
+      # is the wrong kind of attention for a security tool.
       - name: Build binary
-        run: pyinstaller --onefile --clean --name sshscan sshscan.py
+        run: |
+          pyinstaller --onefile --clean --strip \
+            --exclude-module tkinter \
+            --name sshscan sshscan.py
 
       # Network-free code paths only -- these must work in a bundled binary.
       - name: Smoke-test the binary
@@ -56,13 +61,26 @@ jobs:
           ./dist/sshscan --list-frameworks  > /dev/null
           ./dist/sshscan --list-filter      > /dev/null
 
-      - name: Stage artifact
+      # Ship archives, not bare binaries: tar/zip carry the executable bit, a
+      # browser download of a raw binary does not. Checksums cover the archives,
+      # i.e. what people actually download.
+      - name: Package
         run: |
           mkdir -p out
-          cp dist/sshscan "out/sshscan-${{ matrix.target }}"
-          chmod +x "out/sshscan-${{ matrix.target }}"
+          cp dist/sshscan sshscan
+          chmod +x sshscan
+          tar -czf "out/sshscan-${{ matrix.target }}.tar.gz" sshscan
+          zip -q   "out/sshscan-${{ matrix.target }}.zip"    sshscan
           cd out
-          shasum -a 256 "sshscan-${{ matrix.target }}" > "sshscan-${{ matrix.target }}.sha256"
+          shasum -a 256 "sshscan-${{ matrix.target }}.tar.gz" \
+                        "sshscan-${{ matrix.target }}.zip" \
+                        > "SHA256SUMS-${{ matrix.target }}"
+
+      - name: Sizes
+        run: |
+          echo "::notice title=Size ${{ matrix.target }}::$(du -h dist/sshscan | cut -f1) raw / $(du -h out/sshscan-${{ matrix.target }}.tar.gz | cut -f1) tar.gz / $(du -h out/sshscan-${{ matrix.target }}.zip | cut -f1) zip"
+          echo "--- raw binary ---"; ls -lh dist/sshscan
+          echo "--- archives ---";   ls -lh out/
 
       - uses: actions/upload-artifact@v7
         with:
@@ -99,8 +117,12 @@ jobs:
       - name: Run test suite
         run: python -m unittest discover -s tests
 
+      # No --strip here: it can break the code signature on macOS.
       - name: Build binary
-        run: pyinstaller --onefile --clean --name sshscan sshscan.py
+        run: |
+          pyinstaller --onefile --clean \
+            --exclude-module tkinter \
+            --name sshscan sshscan.py
 
       - name: Smoke-test the binary
         run: |
@@ -110,13 +132,23 @@ jobs:
           ./dist/sshscan --list-frameworks  > /dev/null
           ./dist/sshscan --list-filter      > /dev/null
 
-      - name: Stage artifact
+      - name: Package
         run: |
           mkdir -p out
-          cp dist/sshscan "out/sshscan-${{ matrix.target }}"
-          chmod +x "out/sshscan-${{ matrix.target }}"
+          cp dist/sshscan sshscan
+          chmod +x sshscan
+          tar -czf "out/sshscan-${{ matrix.target }}.tar.gz" sshscan
+          zip -q   "out/sshscan-${{ matrix.target }}.zip"    sshscan
           cd out
-          shasum -a 256 "sshscan-${{ matrix.target }}" > "sshscan-${{ matrix.target }}.sha256"
+          shasum -a 256 "sshscan-${{ matrix.target }}.tar.gz" \
+                        "sshscan-${{ matrix.target }}.zip" \
+                        > "SHA256SUMS-${{ matrix.target }}"
+
+      - name: Sizes
+        run: |
+          echo "::notice title=Size ${{ matrix.target }}::$(du -h dist/sshscan | cut -f1) raw / $(du -h out/sshscan-${{ matrix.target }}.tar.gz | cut -f1) tar.gz / $(du -h out/sshscan-${{ matrix.target }}.zip | cut -f1) zip"
+          echo "--- raw binary ---"; ls -lh dist/sshscan
+          echo "--- archives ---";   ls -lh out/
 
       - uses: actions/upload-artifact@v7
         with:
@@ -125,6 +157,8 @@ jobs:
           if-no-files-found: error
 
   # "Should run on Debian" is not "does run on Debian" -- so run it there.
+  # Unpacking the shipped archive here also proves the archive is intact and
+  # that the executable bit survives the round trip.
   verify-debian:
     name: verify ${{ matrix.debian }} / ${{ matrix.target }}
     needs: build-linux
@@ -152,15 +186,17 @@ jobs:
         with:
           name: sshscan-${{ matrix.target }}
 
-      - name: Run the binary on a bare Debian
+      - name: Verify checksum, unpack, run on a bare Debian
         run: |
           set -eux
           ldd --version | head -1
-          chmod +x "sshscan-${{ matrix.target }}"
-          ./sshscan-${{ matrix.target }} --version
-          ./sshscan-${{ matrix.target }} --legend
-          ./sshscan-${{ matrix.target }} --list-algorithms > /dev/null
-          ./sshscan-${{ matrix.target }} --list-frameworks > /dev/null
+          sha256sum -c "SHA256SUMS-${{ matrix.target }}"
+          tar -xzf "sshscan-${{ matrix.target }}.tar.gz"
+          test -x sshscan                      # executable bit survived the archive
+          ./sshscan --version
+          ./sshscan --legend
+          ./sshscan --list-algorithms > /dev/null
+          ./sshscan --list-frameworks > /dev/null
 
   release:
     name: Attach binaries to release
@@ -182,7 +218,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
              --repo  "$GITHUB_REPOSITORY" \
              --title "$GITHUB_REF_NAME" \
-             --notes "Prebuilt binaries. Verify a download against its .sha256 file before running it." \
+             --notes "Prebuilt binaries. Unpack the archive for your platform and verify it against SHA256SUMS-<platform> first. The binary needs the system \`ssh\` client." \
              artifacts/* \
           || gh release upload "$GITHUB_REF_NAME" artifacts/* \
              --repo "$GITHUB_REPOSITORY" --clobber
