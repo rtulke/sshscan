@@ -2,113 +2,95 @@
 
 For sshscan core-developer only!
 
-Updates the version in source code, README, CHANGELOG, commits and tags the
-sshscan repo, computes the release tarball SHA256, and updates the Homebrew formula.
+Bumps the version in the source, README and CHANGELOG, commits and tags the sshscan
+repo, computes the release tarball SHA256 and updates the Homebrew formula.
+
+Pushing the tag additionally triggers `.github/workflows/release.yml`, which builds
+the binaries and the `.deb`/`.rpm` packages and attaches them to the GitHub release.
+That part runs on GitHub, not on your machine — the script does not wait for it.
 
 ## One-time setup
 
-```bash
-chmod +x development/update_homebrew.sh
-```
-
-## Usage
+Both repos must sit next to each other under `~/dev/`:
 
 ```bash
-# With explicit version:
-./development/update_homebrew.sh 3.6.0
-
-# Without argument — interactive wizard:
-./development/update_homebrew.sh
-```
-
-The wizard automatically suggests the next patch version (e.g. `3.5.0` → `3.5.1`)
-and shows a confirmation prompt before doing anything.
-
-## Release workflow
-
-The script expects a clean working tree. Follow these three steps:
-
-
-**1. Clone repositories
-
-
-Make sure you're in the "sshscan" directory! For example, the "sshscan" and "hombrew_scan" repositories are located in your "dev" directory; if they aren't, you should create them there.
-
-
- - https://github.com/rtulke/homebrew-sshscan
- - https://github.com/rtulke/sshscan
-
-```bash
-cd dev/
+cd ~/dev
 git clone https://github.com/rtulke/sshscan.git
 git clone git@github.com:rtulke/homebrew-sshscan.git
+chmod +x sshscan/development/update_homebrew.sh
 ```
 
+## Before you release
 
-**2. Commit all pending changes first**
-
-
-The script only stages `sshscan.py`, `README.md`, and `CHANGELOG.md`.
-Everything else (feature work, reorganisation, config changes) must be committed before running it:
-
-Change to the sshscan directory
-
-```bash
-cd dev/sshscan
-```
-
-You've made some changes to the code and want to commit a new version.
-
-```
-git add .
-git commit -m "Your commit message"
-git push origin main
-```
-
-**3. Run the script**
-
-
-```bash
-./development/update_homebrew.sh 3.6.1
-# or without an argument to use the interactive wizard:
-./development/update_homebrew.sh
-```
-
-The script handles everything from here: version bump, commit, tag, push, SHA256,
-Homebrew formula update, and the tap commit/push.
-
-**4. Fill in the CHANGELOG (prompted by the script)**
-
-After inserting the placeholder, the script opens `$EDITOR` (falls back to `vi`)
-so you can fill in the new version section immediately. Save and quit — the script
-commits the finished CHANGELOG together with the version bump and continues.
-
----
-
-## What happens
-
-| Step | Action |
-|---|---|
-| 1 | Update `sshscan.py`, `README.md`, `CHANGELOG.md` to the new version |
-| 2 | `git commit` + `tag vX.Y.Z` + `git push` in the sshscan repo |
-| 3 | Download release tarball from GitHub, compute SHA256 (up to 10 attempts) |
-| 4 | Update `url`, `sha256`, and test version string in the Homebrew formula |
-| 5 | `git commit` + `git push` in the homebrew-sshscan repo |
-
-## After the release
-
-- Users can upgrade with `brew upgrade sshscan`
-
-## Manual recovery (if the script fails mid-run)
-
-If the script aborted after bumping the version in the source files but before
-committing, finish the release by hand. Replace `X.Y.Z` with the target version.
-
-**1. Commit, tag, and push the sshscan repo**
+**1. Commit everything you want in the release.**
+The script only stages `sshscan.py`, `README.md` and `CHANGELOG.md`. Anything else
+in the working tree is left behind and silently misses the release:
 
 ```bash
 cd ~/dev/sshscan
+git add . && git commit -m "..." && git push origin main
+```
 
+This matters most for `.github/workflows/release.yml`: **GitHub reads the workflow
+from the tagged commit.** If a workflow change is not pushed before you tag, the tag
+runs the old version — or, if the file did not exist yet, nothing at all.
+
+**2. Make sure the test suite passes.**
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+**3. Have the CHANGELOG text ready.**
+The script inserts a placeholder and opens `$EDITOR` mid-run. Do not pre-write the
+section into `CHANGELOG.md` — you would end up with it twice.
+
+## Run it
+
+```bash
+./development/update_homebrew.sh 3.7.4     # explicit version
+./development/update_homebrew.sh           # interactive wizard, suggests the next patch
+```
+
+## What happens
+
+| Step | Action | Where |
+|---|---|---|
+| 1 | Bump the version in `sshscan.py`, `README.md` (version line **and** the package download URLs, which carry the version in the filename) and insert a CHANGELOG placeholder, then open `$EDITOR` | local |
+| 2 | `git commit` + `tag vX.Y.Z` + `git push` | sshscan repo |
+| 3 | Download the release tarball, compute its SHA256 (up to 10 attempts, GitHub needs a few seconds) | local |
+| 4 | Update `url`, `sha256` and the test version string in the formula | tap repo |
+| 5 | `git commit` + `git push` | tap repo |
+| 6 | *(triggered by the tag, runs on GitHub)* build binaries, build `.deb`/`.rpm`, install and run them in Debian 12/13, Rocky 9 and Fedora containers, attach everything to the release | GitHub Actions |
+
+## After the release
+
+```bash
+gh run list --workflow=release.yml --limit 1   # step 6 -- takes a few minutes
+gh release view vX.Y.Z                         # should list 16 assets
+brew update && brew upgrade sshscan
+```
+
+## Two rules that will bite you
+
+**Never rewrite or move a published tag.** The tarball SHA256 in the Homebrew formula
+is derived from it. Moving the tag changes the tarball, the recorded hash no longer
+matches, and `brew install` fails with "SHA256 mismatch" for everyone until you
+re-point the formula. This also makes a `git rebase` over an already-tagged commit
+expensive: it invalidates every tag above it.
+
+**The release script does no `git pull`.** If `origin/main` moved on since your last
+fetch, `git push origin main` fails *after* the commit and *before* the tag, leaving
+the release half-done. Recover with the manual steps below.
+
+## Manual recovery (if the script fails mid-run)
+
+Replace `X.Y.Z` with the target version.
+
+**1. Commit, tag and push the sshscan repo**
+
+```bash
+cd ~/dev/sshscan
 git add sshscan.py README.md CHANGELOG.md
 git commit -m "Bump version to X.Y.Z"
 git tag vX.Y.Z
@@ -121,19 +103,24 @@ git push origin vX.Y.Z
 Wait a few seconds for GitHub to publish the tag, then:
 
 ```bash
-curl -sL https://github.com/rtulke/sshscan/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256
+curl -fsL https://github.com/rtulke/sshscan/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256
 ```
+
+The `-f` is not optional. Without it, curl prints GitHub's 404 page on an HTTP error
+instead of failing, `shasum` cheerfully hashes that HTML, and the hash of an error
+page ends up in the formula. If the command prints nothing, the tarball is not ready
+yet — wait and retry rather than hashing whatever comes back.
 
 **3. Update the Homebrew formula**
 
-Edit `~/dev/homebrew-sshscan/Formula/sshscan.rb` — update the `url` (version in
-the tarball path) and the formula-level `sha256` with the hash from step 2.
+Edit `~/dev/homebrew-sshscan/Formula/sshscan.rb`: the `url` (version in the tarball
+path) and the **formula-level** `sha256` — not the one inside the `resource "pyyaml"`
+block.
 
 **4. Commit and push the tap**
 
 ```bash
 cd ~/dev/homebrew-sshscan
-
 git add Formula/sshscan.rb
 git commit -m "Update sshscan formula to vX.Y.Z"
 git push origin main
@@ -141,6 +128,6 @@ git push origin main
 
 ## Requirements
 
-The following tools must be available in `PATH`: `git`, `curl`, `python3`
-
-The Homebrew tap repo is expected at `~/dev/homebrew-sshscan/`.
+`git`, `curl`, `python3`, `shasum` in `PATH`. The tap repo is expected at
+`~/dev/homebrew-sshscan/`. The binary/package build needs nothing locally — it runs
+on GitHub's runners.
