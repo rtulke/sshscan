@@ -6,9 +6,27 @@ All notable changes to SSH Algorithm Security Scanner are documented here.
 
 ## [3.7.2] — Current
 
+Tooling release: tagged releases now ship prebuilt binaries. No functional
+change to the scanner — sshscan.py is identical to 3.7.1.
+
 ### New Features
 
-fix gh ci/cd pipeline 
+.github/workflows/release.yml (NEW):
+    - Tagged releases ship prebuilt, dependency-free binaries (PyInstaller):
+      linux-x86_64, linux-arm64 and macos-arm64, each with a .sha256 file
+    - Every binary is smoke-tested after the build; the Linux binary is
+      additionally executed inside debian:12 and debian:13 containers before
+      it ships, on both architectures
+    - Binaries still require the system `ssh` client — the scanner shells out
+      to it by design
+
+### Fixes
+
+development/update_homebrew.sh:
+    - The tarball fetch used `curl -sL` without `-f`: on an HTTP error GitHub's
+      404 page was hashed, and that hash would have been written into the
+      Homebrew formula. Now uses `curl -fsL` and retries instead
+
 ---
 
 ## [3.7.1]
