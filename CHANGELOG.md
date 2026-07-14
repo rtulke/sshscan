@@ -6,9 +6,17 @@ All notable changes to SSH Algorithm Security Scanner are documented here.
 
 ## [3.7.1] — Current
 
-### New Features
+Maintenance release: fixes a stale test fixture left behind by the 3.7.0
+NIST compliance change. No functional change to the scanner itself.
 
-Fix stale NIST test fixture (P-curves -> curve25519/ed25519)"
+### Fixes
+
+tests/test_sshscan.py:
+    - Fixed a stale NIST test fixture: it still required the NIST P-curves
+      (ecdh-sha2-nistp256 / ecdsa-sha2-nistp256), which 3.7.0 replaced with
+      curve25519-sha256 / ssh-ed25519. test_compliant_set_passes failed as a
+      result; the full suite (38 tests) is green again.
+
 ---
 
 ## [3.7.0]
