@@ -364,10 +364,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Backticks around <platform> are load-bearing: GitHub renders the notes
+          # as markdown and silently swallows a bare <platform> as an HTML tag.
           gh release create "$GITHUB_REF_NAME" \
              --repo  "$GITHUB_REPOSITORY" \
              --title "$GITHUB_REF_NAME" \
-             --notes "Verify downloads against SHA256SUMS-<platform>.
+             --notes "Verify downloads against \`SHA256SUMS-<platform>\`.
 
           **Packages** (Linux): \`sshscan\` needs the distro's python3 + PyYAML (~50 KB); \`sshscan-bin\` bundles its own Python (~8.6 MB). They conflict -- install one.
           **Tarball**: unpack and run, no install needed.
