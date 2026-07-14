@@ -1,0 +1,137 @@
+name: Release binaries
+
+# Tag push -> build + attach to the GitHub release.
+# Manual run  -> build only (artifacts land under the workflow run, no release touched).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Oldest supported glibc wins: a binary built on 22.04 runs on newer
+          # distros, one built on 24.04 does not run on older ones.
+          - os: ubuntu-22.04
+            target: linux-x86_64
+          - os: ubuntu-22.04-arm
+            target: linux-arm64
+          - os: macos-13        # Intel
+            target: macos-x86_64
+          - os: macos-14        # Apple Silicon
+            target: macos-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Run test suite
+        run: python -m unittest discover -s tests
+
+      - name: Build binary
+        run: pyinstaller --onefile --clean --name sshscan sshscan.py
+
+      # Network-free code paths only -- these must work in a bundled binary.
+      - name: Smoke-test the binary
+        run: |
+          ./dist/sshscan --version
+          ./dist/sshscan --legend
+          ./dist/sshscan --list-algorithms  > /dev/null
+          ./dist/sshscan --list-frameworks  > /dev/null
+          ./dist/sshscan --list-filter      > /dev/null
+
+      - name: Stage artifact
+        run: |
+          mkdir -p out
+          cp dist/sshscan "out/sshscan-${{ matrix.target }}"
+          chmod +x "out/sshscan-${{ matrix.target }}"
+          cd out
+          shasum -a 256 "sshscan-${{ matrix.target }}" > "sshscan-${{ matrix.target }}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sshscan-${{ matrix.target }}
+          path: out/*
+          if-no-files-found: error
+
+  # The Linux binary is built once, on the oldest glibc we support (Ubuntu 22.04,
+  # glibc 2.35). glibc is backwards compatible, so that one binary also covers
+  # Debian 12 (2.36) and Debian 13 (2.41) -- but "should work" is not "works",
+  # so we actually run it in those containers before shipping it.
+  verify-debian:
+    name: verify ${{ matrix.debian }} / ${{ matrix.target }}
+    needs: build
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.debian }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - debian: debian:12
+            os: ubuntu-22.04
+            target: linux-x86_64
+          - debian: debian:13
+            os: ubuntu-22.04
+            target: linux-x86_64
+          - debian: debian:12
+            os: ubuntu-22.04-arm
+            target: linux-arm64
+          - debian: debian:13
+            os: ubuntu-22.04-arm
+            target: linux-arm64
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sshscan-${{ matrix.target }}
+
+      - name: Run the binary on a bare Debian
+        run: |
+          set -eux
+          ldd --version | head -1
+          chmod +x "sshscan-${{ matrix.target }}"
+          ./sshscan-${{ matrix.target }} --version
+          ./sshscan-${{ matrix.target }} --legend
+          ./sshscan-${{ matrix.target }} --list-algorithms > /dev/null
+          ./sshscan-${{ matrix.target }} --list-frameworks > /dev/null
+
+  release:
+    name: Attach binaries to release
+    needs: [build, verify-debian]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+             --repo  "$GITHUB_REPOSITORY" \
+             --title "$GITHUB_REF_NAME" \
+             --notes "Prebuilt binaries. Verify a download against its .sha256 file before running it." \
+             artifacts/* \
+          || gh release upload "$GITHUB_REF_NAME" artifacts/* \
+             --repo "$GITHUB_REPOSITORY" --clobber
