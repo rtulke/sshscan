@@ -90,11 +90,17 @@ sed -i.bak "s/__version__ = '${CURRENT_VERSION}'/__version__ = '${NEW_VERSION}'/
 rm -f "$SSHSCAN_DIR/sshscan.py.bak"
 ok "sshscan.py  (__version__ = '${NEW_VERSION}')"
 
-# README.md
-sed -i.bak "s/\*\*Version:\*\* ${CURRENT_VERSION}/**Version:** ${NEW_VERSION}/" \
+# README.md -- version line AND the release-download URLs, which carry the version
+# in the package filename (sshscan_X.Y.Z_amd64.deb / sshscan-X.Y.Z-1.x86_64.rpm).
+# Without the second and third pattern the install instructions point at files
+# that no longer exist after the next release.
+sed -i.bak \
+  -e "s/\*\*Version:\*\* ${CURRENT_VERSION}/**Version:** ${NEW_VERSION}/" \
+  -e "s/_${CURRENT_VERSION}_/_${NEW_VERSION}_/g" \
+  -e "s/-${CURRENT_VERSION}-1\./-${NEW_VERSION}-1./g" \
   "$SSHSCAN_DIR/README.md"
 rm -f "$SSHSCAN_DIR/README.md.bak"
-ok "README.md"
+ok "README.md  (version + package download URLs)"
 
 # CHANGELOG.md — insert placeholder section above current release entry
 python3 - <<PYEOF

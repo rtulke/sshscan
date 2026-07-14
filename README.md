@@ -26,6 +26,8 @@ logs in and never executes commands; it only observes what the server is willing
 - [Requirements](#requirements)
 - [Supported OS](#supported-os)
 - [Installation](#installation)
+  - [Linux (.deb / .rpm)](#linux-deb--rpm)
+  - [Standalone binary (no installation)](#standalone-binary-no-installation)
   - [macOS (Homebrew)](#macos-homebrew)
   - [Quick (system Python)](#quick-system-python)
   - [Windows (WSL or native OpenSSH)](#windows-wsl-or-native-openssh)
@@ -184,6 +186,60 @@ Any SSH server is a valid target regardless of OS or hardware:
 ---
 
 ## Installation
+
+### Linux (.deb / .rpm)
+
+Every release ships packages for `amd64` / `x86_64` and `arm64` / `aarch64`, in **two flavours**.
+Pick one — they install the same `/usr/bin/sshscan` and therefore conflict with each other:
+
+| Package | Contains | Size | Needs Python? |
+|---|---|---|---|
+| `sshscan` | the Python script | ~50 KB | yes — pulls in `python3` + PyYAML |
+| `sshscan-bin` | a self-contained binary | ~8.6 MB | no — bundles its own interpreter |
+
+Use `sshscan` on a normal server. Use `sshscan-bin` where you do not want to install Python at all,
+or where the distro's Python is too old.
+
+**Debian / Ubuntu** (and derivatives):
+
+```bash
+# pick the variant and architecture you need
+curl -LO https://github.com/rtulke/sshscan/releases/latest/download/sshscan_3.7.2_amd64.deb
+sudo apt install ./sshscan_3.7.2_amd64.deb
+```
+
+**RHEL / Rocky / AlmaLinux / Fedora**:
+
+```bash
+sudo dnf install https://github.com/rtulke/sshscan/releases/latest/download/sshscan-3.7.2-1.x86_64.rpm
+```
+
+Both pull in the OpenSSH client (`openssh-client` / `openssh-clients`) automatically, drop a default
+config at `/etc/sshscan/sshscan.conf` (preserved across upgrades) and install bash completion.
+
+Verify a download before installing it:
+
+```bash
+curl -LO https://github.com/rtulke/sshscan/releases/latest/download/SHA256SUMS-linux-x86_64
+sha256sum -c SHA256SUMS-linux-x86_64
+```
+
+> The binaries are built against **glibc 2.28**, so they run on RHEL/Rocky/Alma 8+, Debian 10+ and
+> Ubuntu 20.04+. Each release is installed and executed in Debian 12/13, Rocky 9 and Fedora
+> containers before it is published.
+
+### Standalone binary (no installation)
+
+For a one-off run on a machine you do not want to modify — useful on servers where you have no
+root, or none of the package managers above:
+
+```bash
+curl -L https://github.com/rtulke/sshscan/releases/latest/download/sshscan-linux-x86_64.tar.gz | tar xz
+./sshscan --version
+```
+
+Available as `sshscan-linux-x86_64.tar.gz`, `sshscan-linux-arm64.tar.gz` and
+`sshscan-macos-arm64.tar.gz`. The binary still calls the system `ssh` client, which must be present.
 
 ### macOS (Homebrew)
 
