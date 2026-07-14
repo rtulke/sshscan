@@ -4,7 +4,14 @@ All notable changes to SSH Algorithm Security Scanner are documented here.
 
 ---
 
-## [3.7.1] — Current
+## [3.7.2] — Current
+
+### New Features
+
+fix gh ci/cd pipeline 
+---
+
+## [3.7.1]
 
 Maintenance release: fixes a stale test fixture left behind by the 3.7.0
 NIST compliance change. No functional change to the scanner itself.

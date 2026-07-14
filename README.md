@@ -12,7 +12,7 @@ so results do not depend on the local SSH client version. A per-algorithm probin
 instead. Either way: no paramiko, no authentication, no credentials required — the tool never
 logs in and never executes commands; it only observes what the server is willing to negotiate.
 
-**Version:** 3.7.1 | **Author:** Robert Tulke
+**Version:** 3.7.2 | **Author:** Robert Tulke
 
 ![Example](/demo/sshscan.png)
 

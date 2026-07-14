@@ -5,7 +5,7 @@ Features: Compliance Frameworks, NSA Backdoor Detection, INI Config,
          Retry Logic, DNS Caching, Enhanced Debug Mode, JumpHost/Bastion Function
 """
 
-__version__ = '3.7.1'
+__version__ = '3.7.2'
 __author__  = 'Robert Tulke, rt@debian.sh'
 
 import subprocess
