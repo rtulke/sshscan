@@ -45,11 +45,14 @@ def algos(cipher=(), mac=(), kex=(), key=()):
 
 
 # A fully NIST-compliant algorithm set (all required present, none forbidden).
+# NIST requires curve25519-sha256 / ssh-ed25519, not the NIST P-curves: the
+# NSA-risk score penalty on the P-curves would keep a P-curve server below
+# minimum_score (80) and make compliance unreachable. See FRAMEWORKS['NIST'].
 NIST_COMPLIANT = dict(
     cipher=('aes256-ctr', 'aes128-ctr'),
     mac=('hmac-sha2-256', 'hmac-sha2-512'),
-    kex=('ecdh-sha2-nistp256',),
-    key=('ecdsa-sha2-nistp256',),
+    kex=('curve25519-sha256',),
+    key=('ssh-ed25519',),
 )
 
 
