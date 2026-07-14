@@ -4,7 +4,14 @@ All notable changes to SSH Algorithm Security Scanner are documented here.
 
 ---
 
-## [3.7.0] — Current
+## [3.7.1] — Current
+
+### New Features
+
+Fix stale NIST test fixture (P-curves -> curve25519/ed25519)"
+---
+
+## [3.7.0]
 
 Fast (KEXINIT) scan mode is now the default; major probe-mode correctness fixes;
 new Schema B output markers; new --probe and --legend flags. Full README refresh,
