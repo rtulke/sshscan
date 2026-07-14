@@ -146,11 +146,18 @@ MAX_ATTEMPTS=10
 for ((i=1; i<=MAX_ATTEMPTS; i++)); do
   echo -e "  ${DIM}Attempt ${i}/${MAX_ATTEMPTS} — waiting for GitHub to publish tarball...${NC}"
   sleep 6
-  SHA256=$(curl -sL "$TARBALL_URL" | shasum -a 256 | awk '{print $1}')
-  if [[ -n "$SHA256" && "$SHA256" != "$EMPTY_SHA" ]]; then
-    ok "SHA256: ${SHA256}"
-    break
+  TARBALL=$(mktemp)
+  # -f: fail on 4xx/5xx instead of writing GitHub's error page to the file --
+  # without it, shasum happily hashes the 404 HTML and that hash lands in the formula.
+  if curl -fsL "$TARBALL_URL" -o "$TARBALL"; then
+    SHA256=$(shasum -a 256 "$TARBALL" | awk '{print $1}')
+    if [[ -n "$SHA256" && "$SHA256" != "$EMPTY_SHA" ]]; then
+      rm -f "$TARBALL"
+      ok "SHA256: ${SHA256}"
+      break
+    fi
   fi
+  rm -f "$TARBALL"
   SHA256=""
 done
 
@@ -209,6 +216,4 @@ echo -e "${GREEN}${BOLD}  ✓  Release v${NEW_VERSION} complete${NC}"
 echo ""
 echo    "  GitHub release : https://github.com/${GITHUB_REPO}/releases/tag/v${NEW_VERSION}"
 echo    "  Homebrew tap   : brew upgrade sshscan"
-echo ""
-echo -e "  ${YELLOW}Next:${NC} fill in CHANGELOG.md for v${NEW_VERSION} and commit."
 echo ""
