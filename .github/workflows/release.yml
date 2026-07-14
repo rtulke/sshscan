@@ -11,28 +11,28 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  # Linux and macOS are separate jobs, not one matrix: verify-debian only needs
+  # the Linux binary, and a single `needs:` on a combined matrix would make it
+  # wait for the macOS Intel build too (which routinely sits in the queue for
+  # an hour). needs: works per job, not per matrix entry.
+  build-linux:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Oldest supported glibc wins: a binary built on 22.04 runs on newer
-          # distros, one built on 24.04 does not run on older ones.
+          # Oldest supported glibc wins: a binary built on 22.04 (glibc 2.35)
+          # also runs on Debian 12 (2.36) and 13 (2.41). The reverse is not true.
           - os: ubuntu-22.04
             target: linux-x86_64
           - os: ubuntu-22.04-arm
             target: linux-arm64
-          - os: macos-13        # Intel
-            target: macos-x86_64
-          - os: macos-14        # Apple Silicon
-            target: macos-arm64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -64,19 +64,70 @@ jobs:
           cd out
           shasum -a 256 "sshscan-${{ matrix.target }}" > "sshscan-${{ matrix.target }}.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sshscan-${{ matrix.target }}
           path: out/*
           if-no-files-found: error
 
-  # The Linux binary is built once, on the oldest glibc we support (Ubuntu 22.04,
-  # glibc 2.35). glibc is backwards compatible, so that one binary also covers
-  # Debian 12 (2.36) and Debian 13 (2.41) -- but "should work" is not "works",
-  # so we actually run it in those containers before shipping it.
+  build-macos:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14        # Apple Silicon
+            target: macos-arm64
+          # Intel (macos-13) dropped on purpose: the runner is scarce and sat in
+          # the queue for an hour, blocking the whole run. Node 24 also drops
+          # macOS <= 13.4. Intel users get the .py build via the Homebrew tap.
+          # To bring it back: - {os: macos-13, target: macos-x86_64}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Run test suite
+        run: python -m unittest discover -s tests
+
+      - name: Build binary
+        run: pyinstaller --onefile --clean --name sshscan sshscan.py
+
+      - name: Smoke-test the binary
+        run: |
+          ./dist/sshscan --version
+          ./dist/sshscan --legend
+          ./dist/sshscan --list-algorithms  > /dev/null
+          ./dist/sshscan --list-frameworks  > /dev/null
+          ./dist/sshscan --list-filter      > /dev/null
+
+      - name: Stage artifact
+        run: |
+          mkdir -p out
+          cp dist/sshscan "out/sshscan-${{ matrix.target }}"
+          chmod +x "out/sshscan-${{ matrix.target }}"
+          cd out
+          shasum -a 256 "sshscan-${{ matrix.target }}" > "sshscan-${{ matrix.target }}.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sshscan-${{ matrix.target }}
+          path: out/*
+          if-no-files-found: error
+
+  # "Should run on Debian" is not "does run on Debian" -- so run it there.
   verify-debian:
     name: verify ${{ matrix.debian }} / ${{ matrix.target }}
-    needs: build
+    needs: build-linux
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.debian }}
     strategy:
@@ -97,7 +148,7 @@ jobs:
             target: linux-arm64
 
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: sshscan-${{ matrix.target }}
 
@@ -113,13 +164,13 @@ jobs:
 
   release:
     name: Attach binaries to release
-    needs: [build, verify-debian]
+    needs: [build-linux, build-macos, verify-debian]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
